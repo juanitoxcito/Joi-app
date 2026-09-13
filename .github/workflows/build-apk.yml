@@ -11,9 +11,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compilar con Buildozer (imagen oficial)
+      - name: Preparar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias del sistema
         run: |
-          docker run --rm -v "$PWD":/home/user/hostcwd kivy/buildozer android debug
+          sudo apt-get update
+          sudo apt-get install -y git zip unzip openjdk-17-jdk python3-pip autoconf libtool pkg-config \
+            zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev build-essential
+
+      - name: Instalar Buildozer
+        run: |
+          pip install --upgrade pip
+          pip install buildozer cython==0.29.33
+
+      - name: Compilar APK
+        run: |
+          yes | buildozer android debug
 
       - name: Subir el APK como archivo descargable
         uses: actions/upload-artifact@v4
