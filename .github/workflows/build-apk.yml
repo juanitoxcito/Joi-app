@@ -16,17 +16,17 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Alinear python3 del sistema con 3.11
-        run: |
-          sudo update-alternatives --install /usr/bin/python3 python3 $(which python3.11) 1
-          sudo update-alternatives --set python3 $(which python3.11)
-          python3 --version
-
       - name: Instalar dependencias del sistema
         run: |
           sudo apt-get update
           sudo apt-get install -y git zip unzip openjdk-17-jdk python3-pip autoconf libtool pkg-config \
             zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev build-essential
+
+      - name: Alinear python3 del sistema con 3.11
+        run: |
+          sudo update-alternatives --install /usr/bin/python3 python3 $(which python3.11) 1
+          sudo update-alternatives --set python3 $(which python3.11)
+          python3 --version
 
       - name: Instalar Buildozer
         run: |
