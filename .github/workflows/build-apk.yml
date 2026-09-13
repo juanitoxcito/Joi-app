@@ -25,8 +25,7 @@ jobs:
       - name: Instalar Buildozer
         run: |
           pip install --upgrade pip
-          pip install buildozer cython==0.29.33
-
+          pip install buildozer cython==0.29.33 python-for-android==2024.1.21
       - name: Compilar APK
         run: |
           yes | buildozer android debug
