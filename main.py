@@ -23,6 +23,7 @@ from kivy.uix.textinput import TextInput
 from kivy.metrics import dp
 from kivy.core.window import Window
 from kivy.core.text import LabelBase
+from kivy.core.audio import SoundLoader
 from kivy.graphics import Color, Rectangle, RoundedRectangle
 
 # ==================== TEMA VISUAL (navy + morado, fuente Poppins) ====================
@@ -42,6 +43,26 @@ LabelBase.register(name="Poppins",
                     fn_bold=os.path.join(_FONT_DIR, "Poppins-Bold.ttf"))
 LabelBase.register(name="PoppinsSemiBold", fn_regular=os.path.join(_FONT_DIR, "Poppins-SemiBold.ttf"))
 LabelBase.register(name="PoppinsMedium", fn_regular=os.path.join(_FONT_DIR, "Poppins-Medium.ttf"))
+
+# ==================== SONIDOS ====================
+_SOUND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "sounds")
+_SONIDOS = {}
+
+
+def _cargar_sonido(nombre):
+    ruta = os.path.join(_SOUND_DIR, f"{nombre}.wav")
+    if nombre not in _SONIDOS:
+        _SONIDOS[nombre] = SoundLoader.load(ruta)
+    return _SONIDOS[nombre]
+
+
+def sonido(nombre):
+    """Reproduce un efecto: 'click' (toque de botón), 'exito' (acción completada
+    con bien: registrar, guardar, confirmar) o 'borrar' (eliminar algo)."""
+    s = _cargar_sonido(nombre)
+    if s:
+        s.stop()
+        s.play()
 
 DB_PATH = "joi.db"
 UTC_MENOS_4 = timezone(timedelta(hours=-4))
@@ -377,7 +398,12 @@ class BotonRedondeado(Button):
 
 def _boton(texto, on_press, color=COLOR_MORADO_OSCURO):
     b = BotonRedondeado(text=texto, size_hint_y=None, height=dp(48), color_fondo=color)
-    b.bind(on_release=on_press)
+
+    def _con_sonido(inst):
+        sonido("click")
+        on_press(inst)
+
+    b.bind(on_release=_con_sonido)
     return b
 
 
@@ -394,9 +420,10 @@ def _con_cancelar(filas_botones):
     return filas_botones
 
 
-def render(texto, filas_botones=None, pedir_texto=False):
+def render(texto, filas_botones=None, pedir_texto=False, teclado_numero=False):
     """Equivalente a enviar()/editar() del bot: redibuja título + botones,
-    y opcionalmente un campo de texto para el paso actual."""
+    y opcionalmente un campo de texto para el paso actual.
+    teclado_numero=True muestra el teclado numérico del teléfono (para montos, días, etc.)."""
     filas_botones = _con_cancelar(filas_botones)
     cont = PANTALLA.contenido
     cont.clear_widgets()
@@ -411,7 +438,9 @@ def render(texto, filas_botones=None, pedir_texto=False):
                              font_size=dp(15), background_normal="", background_active="",
                              background_color=COLOR_PANEL_CLARO, foreground_color=COLOR_TEXTO,
                              cursor_color=COLOR_MORADO, hint_text="Escribe aquí...",
-                             hint_text_color=COLOR_TEXTO_TENUE, padding=(dp(12), dp(12)))
+                             hint_text_color=COLOR_TEXTO_TENUE, padding=(dp(12), dp(12)),
+                             input_filter=("float" if teclado_numero else None),
+                             input_type=("number" if teclado_numero else "text"))
 
         def _enviar_texto(*_a):
             valor = entrada.text
@@ -554,7 +583,7 @@ def manejar_callback(data):
     if data == "pago:frecuencia:mensual":
         ESTADO["datos"]["frecuencia"] = "mensual"
         ESTADO["paso"] = "dia"
-        render("¿Qué día del mes vence? (1-31)", pedir_texto=True)
+        render("¿Qué día del mes vence? (1-31)", pedir_texto=True, teclado_numero=True)
         return
     if data in ("pago:frecuencia:diario", "pago:frecuencia:semanal"):
         ESTADO["datos"]["frecuencia"] = partes[2]
@@ -773,6 +802,7 @@ def registrar_borrar_ejecutar(mov_id):
     con.execute("DELETE FROM movimientos WHERE id=?", (mov_id,))
     con.commit()
     con.close()
+    sonido("borrar")
     render(f"Borrado. Nuevo saldo {cuenta[0]}: {round(nuevo_saldo, 2)} {cuenta[2]}.", [[("Menú", "menu:main")]])
 
 
@@ -782,7 +812,7 @@ def registrar_callback(data):
     if partes[1] == "tipo":
         d["tipo"] = partes[2]
         ESTADO["paso"] = "monto"
-        render("¿Cuánto? (escribe solo el número)", pedir_texto=True)
+        render("¿Cuánto? (escribe solo el número)", pedir_texto=True, teclado_numero=True)
         return
     if partes[1] == "moneda":
         d["moneda"] = partes[2]
@@ -827,10 +857,10 @@ def registrar_texto(texto):
     try:
         monto = parsear_monto(texto)
     except ValueError:
-        render("Eso no es un número. Escribe solo la cantidad, ej: 20 o 20000", pedir_texto=True)
+        render("Eso no es un número. Escribe solo la cantidad, ej: 20 o 20000", pedir_texto=True, teclado_numero=True)
         return
     if monto <= 0:
-        render("El monto debe ser mayor a 0.", pedir_texto=True)
+        render("El monto debe ser mayor a 0.", pedir_texto=True, teclado_numero=True)
         return
     ESTADO["datos"]["monto"] = monto
     ESTADO["paso"] = "moneda"
@@ -870,6 +900,7 @@ def finalizar_registro(datos):
         texto += "\n\nRepartido según tu estrategia:\n" + "\n".join(lineas_estrategia)
     if advertencias:
         texto += "\n\n" + "\n".join(advertencias)
+    sonido("exito")
     render(texto, [[("Menú", "menu:main")]])
 
 
@@ -905,6 +936,7 @@ def finalizar_registro_dividido(datos):
              f"Nuevo saldo {cuenta2[0]}: {round(nuevo_saldo2, 2)} {cuenta2[2]}")
     if advertencias:
         texto += "\n\n" + "\n".join(advertencias)
+    sonido("exito")
     render(texto, [[("Menú", "menu:main")]])
 
 
@@ -980,14 +1012,14 @@ def saldo_editar_menu():
 
 def saldo_editar_iniciar(cuenta_id):
     iniciar_flujo("saldo_editar", "monto", {"cuenta_id": cuenta_id})
-    render("¿Cuál es el saldo correcto?", pedir_texto=True)
+    render("¿Cuál es el saldo correcto?", pedir_texto=True, teclado_numero=True)
 
 
 def saldo_editar_texto(texto):
     try:
         monto = parsear_monto(texto)
     except ValueError:
-        render("Escribe solo el número.", pedir_texto=True)
+        render("Escribe solo el número.", pedir_texto=True, teclado_numero=True)
         return
     con = conectar()
     con.execute("UPDATE cuentas SET saldo=?, ultima_confirmacion=? WHERE id=?",
@@ -995,6 +1027,7 @@ def saldo_editar_texto(texto):
     con.commit()
     con.close()
     terminar_flujo()
+    sonido("exito")
     render("Saldo actualizado.", [[("Menú", "menu:main")]])
 
 
@@ -1017,6 +1050,7 @@ def saldo_anexar_quitar_confirmar(cuenta_id):
     con.execute("DELETE FROM cuentas WHERE id=?", (cuenta_id,))
     con.commit()
     con.close()
+    sonido("borrar")
     render("Cuenta eliminada.", [[("Menú", "menu:main")]])
 
 
@@ -1025,13 +1059,13 @@ def anexar_cuenta_texto(texto):
     if ESTADO["paso"] == "nombre":
         d["nombre"] = texto.strip()
         ESTADO["paso"] = "saldo_inicial"
-        render("¿Saldo inicial? (escribe solo el número, 0 si empieza en cero)", pedir_texto=True)
+        render("¿Saldo inicial? (escribe solo el número, 0 si empieza en cero)", pedir_texto=True, teclado_numero=True)
         return
     if ESTADO["paso"] == "saldo_inicial":
         try:
             d["saldo"] = parsear_monto(texto)
         except ValueError:
-            render("Eso no es un número. Escribe solo la cantidad.", pedir_texto=True)
+            render("Eso no es un número. Escribe solo la cantidad.", pedir_texto=True, teclado_numero=True)
             return
         ESTADO["paso"] = "moneda"
         render("¿Moneda?", [[("USD", "anexar:moneda:USD"), ("USDT", "anexar:moneda:USDT"), ("VES", "anexar:moneda:VES")]])
@@ -1046,6 +1080,7 @@ def anexar_cuenta_callback(moneda):
                     (d["nombre"], d["saldo"], moneda, datetime.now(UTC_MENOS_4).isoformat()))
         con.commit()
         render(f"Cuenta '{d['nombre']}' agregada.", [[("Menú", "menu:main")]])
+        sonido("exito")
     except sqlite3.IntegrityError:
         render("Ya existe una cuenta con ese nombre.", [[("Menú", "menu:main")]])
     finally:
@@ -1080,6 +1115,7 @@ def recalcular_estrategia_ejecutar():
     for did, nombre, monto_total, moneda, dia_pago in deudas_cuotas:
         calcular_resumen_cuotas(con, did, nombre, monto_total, moneda, dia_pago)
     con.close()
+    sonido("exito")
     render("Plan actualizado con tus datos actuales.", [[("Menú", "menu:main")]])
 
 
@@ -1116,13 +1152,13 @@ def deuda_nueva_texto(texto):
     if ESTADO["paso"] == "nombre":
         d["nombre"] = texto.strip()
         ESTADO["paso"] = "monto_total"
-        render("¿Monto?", pedir_texto=True)
+        render("¿Monto?", pedir_texto=True, teclado_numero=True)
         return
     if ESTADO["paso"] == "monto_total":
         try:
             d["monto_total"] = parsear_monto(texto)
         except ValueError:
-            render("Escribe solo el número.", pedir_texto=True)
+            render("Escribe solo el número.", pedir_texto=True, teclado_numero=True)
             return
         ESTADO["paso"] = "moneda"
         render("¿Moneda?", [[("USD", "deuda:moneda:USD"), ("USDT", "deuda:moneda:USDT"), ("VES", "deuda:moneda:VES")]])
@@ -1131,7 +1167,7 @@ def deuda_nueva_texto(texto):
         try:
             d["interes_mensual"] = parsear_monto(texto) / 100
         except ValueError:
-            render("Escribe solo el número, ej: 10 para 10%.", pedir_texto=True)
+            render("Escribe solo el número, ej: 10 para 10%.", pedir_texto=True, teclado_numero=True)
             return
         con = conectar()
         recomendada, estatus, deuda_total, ingreso_30d = deuda_recomendar_estrategia(
@@ -1225,6 +1261,7 @@ def estrategia_elegir_callback(nombre):
     con.execute("UPDATE config_estrategia SET estrategia_activa=? WHERE id=1", (nombre,))
     con.commit()
     con.close()
+    sonido("exito")
     render(f"Estrategia cambiada a {nombre.upper()}.", [[("Menú", "menu:main")]])
 
 
@@ -1281,7 +1318,7 @@ def informe_mostrar():
 def deuda_moneda_callback(moneda):
     ESTADO["datos"]["moneda"] = moneda
     ESTADO["paso"] = "interes"
-    render("¿Porcentaje de interés mensual? (0 si no tiene)", pedir_texto=True)
+    render("¿Porcentaje de interés mensual? (0 si no tiene)", pedir_texto=True, teclado_numero=True)
 
 
 def deuda_tipopago_callback(tipo_pago):
@@ -1318,6 +1355,7 @@ def deuda_guardar(datos, fecha_seleccionada, dia_pago_directo=None):
         extra = f", vence {fecha_limite}" if fecha_limite else ""
         texto = f"Deuda '{datos['nombre']}' creada: {datos['monto_total']} {datos['moneda']}{extra}."
     con.close()
+    sonido("exito")
     render(texto, [[("Menú", "menu:main")]])
 
 
@@ -1377,6 +1415,7 @@ def deuda_pagada_confirmar(deuda_id):
     con.execute("UPDATE deudas SET estado='pagada', monto_pagado=monto_total WHERE id=?", (deuda_id,))
     con.commit()
     con.close()
+    sonido("exito")
     render("Deuda marcada como pagada.", [[("Menú", "menu:main")]])
 
 
@@ -1415,6 +1454,7 @@ def pago_borrar_ejecutar(pago_id):
     con.execute("DELETE FROM pagos_mensuales WHERE id=?", (pago_id,))
     con.commit()
     con.close()
+    sonido("borrar")
     render("Gasto fijo borrado.", [[("Menú", "menu:main")]])
 
 
@@ -1451,13 +1491,13 @@ def pago_nuevo_texto(texto):
     if ESTADO["paso"] == "nombre":
         d["nombre"] = texto.strip()
         ESTADO["paso"] = "monto"
-        render("¿Monto?", pedir_texto=True)
+        render("¿Monto?", pedir_texto=True, teclado_numero=True)
         return
     if ESTADO["paso"] == "monto":
         try:
             d["monto"] = parsear_monto(texto)
         except ValueError:
-            render("Escribe solo el número.", pedir_texto=True)
+            render("Escribe solo el número.", pedir_texto=True, teclado_numero=True)
             return
         ESTADO["paso"] = "moneda"
         render("¿Moneda?", [[("USD", "pago:moneda:USD"), ("USDT", "pago:moneda:USDT"), ("VES", "pago:moneda:VES")]])
@@ -1467,17 +1507,17 @@ def pago_nuevo_texto(texto):
             dia = int(texto.strip())
             assert 1 <= dia <= 31
         except (ValueError, AssertionError):
-            render("Escribe un número de día válido (1-31).", pedir_texto=True)
+            render("Escribe un número de día válido (1-31).", pedir_texto=True, teclado_numero=True)
             return
         d["dia_vence"] = dia
         ESTADO["paso"] = "recargo"
-        render("¿Recargo por atraso? (0 si no hay)", pedir_texto=True)
+        render("¿Recargo por atraso? (0 si no hay)", pedir_texto=True, teclado_numero=True)
         return
     if ESTADO["paso"] == "recargo":
         try:
             d["recargo"] = parsear_monto(texto)
         except ValueError:
-            render("Escribe solo el número.", pedir_texto=True)
+            render("Escribe solo el número.", pedir_texto=True, teclado_numero=True)
             return
         con = conectar()
         con.execute("INSERT INTO pagos_mensuales (nombre, monto, moneda, frecuencia, dia_vence, recargo) "
@@ -1486,6 +1526,7 @@ def pago_nuevo_texto(texto):
         con.close()
         terminar_flujo()
         extra_recargo = f", recargo {d['recargo']} si se atrasa" if d["recargo"] else ""
+        sonido("exito")
         render(f"Gasto fijo mensual '{d['nombre']}' creado: {d['monto']} {d['moneda']}, día {d['dia_vence']}{extra_recargo}.",
                [[("Menú", "menu:main")]])
 
@@ -1524,6 +1565,7 @@ def pago_recurrente_guardar(d):
     con.close()
     terminar_flujo()
     extra = f", cada {DIAS_SEMANA[d['dia_semana']]}" if d["frecuencia"] == "semanal" else ", todos los días"
+    sonido("exito")
     render(f"Gasto fijo '{d['nombre']}' creado: {d['monto']} {d['moneda']}, categoría {d['categoria']}{extra}, "
            f"prioridad {prioridad}.\nSe registra solo.", [[("Menú", "menu:main")]])
 
@@ -1579,7 +1621,7 @@ def pago_editar_campo_elegido(pago_id, campo):
         iniciar_flujo("pago_editar", campo, {"pago_id": pago_id})
         preguntas = {"nombre": "¿Nuevo nombre?", "monto": "¿Nuevo monto?",
                      "dia_vence": "¿Nuevo día del mes? (1-31)", "recargo": "¿Nuevo recargo?"}
-        render(preguntas[campo], pedir_texto=True)
+        render(preguntas[campo], pedir_texto=True, teclado_numero=(campo != "nombre"))
 
 
 def pago_editar_valor_callback(pago_id, campo, valor):
@@ -1589,6 +1631,7 @@ def pago_editar_valor_callback(pago_id, campo, valor):
     con.execute(f"UPDATE pagos_mensuales SET {columna}=? WHERE id=?", (valor_final, pago_id))
     con.commit()
     con.close()
+    sonido("exito")
     render("Actualizado.", [[("Menú", "menu:main")]])
 
 
@@ -1601,14 +1644,14 @@ def pago_editar_texto(texto):
         try:
             valor = parsear_monto(texto)
         except ValueError:
-            render("Escribe solo el número.", pedir_texto=True)
+            render("Escribe solo el número.", pedir_texto=True, teclado_numero=True)
             return
     elif campo == "dia_vence":
         try:
             valor = int(texto.strip())
             assert 1 <= valor <= 31
         except (ValueError, AssertionError):
-            render("Escribe un número de día válido (1-31).", pedir_texto=True)
+            render("Escribe un número de día válido (1-31).", pedir_texto=True, teclado_numero=True)
             return
     else:
         return
@@ -1617,6 +1660,7 @@ def pago_editar_texto(texto):
     con.commit()
     con.close()
     terminar_flujo()
+    sonido("exito")
     render("Actualizado.", [[("Menú", "menu:main")]])
 
 
@@ -1635,6 +1679,7 @@ def pago_pausar_confirmar(pago_id):
     con.execute("UPDATE pagos_mensuales SET activo=? WHERE id=?", (0 if actual else 1, pago_id))
     con.commit()
     con.close()
+    sonido("exito")
     render("Actualizado.", [[("Menú", "menu:main")]])
 
 
@@ -1643,6 +1688,7 @@ def pago_pausar_prioridad3():
     con.execute("UPDATE pagos_mensuales SET activo=0 WHERE activo=1 AND prioridad=3")
     con.commit()
     con.close()
+    sonido("exito")
     render("Gastos de prioridad 3 pausados.", [[("Menú", "menu:main")]])
 
 
@@ -1656,12 +1702,12 @@ def porcobrar_menu():
 
 def prestamo_iniciar():
     iniciar_flujo("prestamo", "monto")
-    render("¿Cuánto?", pedir_texto=True)
+    render("¿Cuánto?", pedir_texto=True, teclado_numero=True)
 
 
 def cobrar_iniciar():
     iniciar_flujo("porcobrar_nuevo", "monto")
-    render("¿Cuánto te deben?", pedir_texto=True)
+    render("¿Cuánto te deben?", pedir_texto=True, teclado_numero=True)
 
 
 def porcobrar_texto(texto):
@@ -1671,7 +1717,7 @@ def porcobrar_texto(texto):
         try:
             d["monto"] = parsear_monto(texto)
         except ValueError:
-            render("Escribe solo el número.", pedir_texto=True)
+            render("Escribe solo el número.", pedir_texto=True, teclado_numero=True)
             return
         ESTADO["paso"] = "moneda"
         prefijo = "prestamo" if flujo == "prestamo" else "pc"
@@ -1694,6 +1740,7 @@ def porcobrar_texto(texto):
             con.commit()
             con.close()
             terminar_flujo()
+            sonido("exito")
             render(f"Préstamo registrado: {d['monto']} {d['moneda']} ({d['descripcion']}) -- salió de {cuenta[0]}.",
                    [[("Menú", "menu:main")]])
         else:
@@ -1704,6 +1751,7 @@ def porcobrar_texto(texto):
             con.commit()
             con.close()
             terminar_flujo()
+            sonido("exito")
             render(f"Anotado: {d['monto']} {d['moneda']} por cobrar ({d['descripcion']}).", [[("Menú", "menu:main")]])
 
 
@@ -1766,13 +1814,14 @@ def pagado_completo_callback(item_id):
     pagado_aplicar(con, item_id, monto_pendiente_antes)
     con.close()
     terminar_flujo()
+    sonido("exito")
     render(f"Cobrado completo: {monto_pendiente_antes}. Se sumó a BDV.", [[("Menú", "menu:main")]])
 
 
 def pagado_diferente_iniciar(item_id):
     ESTADO["paso"] = "monto_diferente"
     ESTADO["datos"]["item_id"] = item_id
-    render("¿Cuánto te pagaron?", pedir_texto=True)
+    render("¿Cuánto te pagaron?", pedir_texto=True, teclado_numero=True)
 
 
 def pagado_texto(texto):
@@ -1781,15 +1830,17 @@ def pagado_texto(texto):
     try:
         monto = parsear_monto(texto)
     except ValueError:
-        render("Escribe solo el número.", pedir_texto=True)
+        render("Escribe solo el número.", pedir_texto=True, teclado_numero=True)
         return
     con = conectar()
     nuevo_pendiente = pagado_aplicar(con, ESTADO["datos"]["item_id"], monto)
     con.close()
     terminar_flujo()
     if nuevo_pendiente > 0:
+        sonido("exito")
         render(f"Abono registrado: {monto}. Queda pendiente: {nuevo_pendiente}. Se sumó a BDV.", [[("Menú", "menu:main")]])
     else:
+        sonido("exito")
         render(f"Abono registrado: {monto}. Quedó saldado. Se sumó a BDV.", [[("Menú", "menu:main")]])
 
 
@@ -1827,13 +1878,13 @@ def objetivo_nuevo_texto(texto):
     if ESTADO["paso"] == "nombre":
         d["nombre"] = texto.strip()
         ESTADO["paso"] = "monto_meta"
-        render("¿Cuánto quieres juntar?", pedir_texto=True)
+        render("¿Cuánto quieres juntar?", pedir_texto=True, teclado_numero=True)
         return
     if ESTADO["paso"] == "monto_meta":
         try:
             d["monto_meta"] = parsear_monto(texto)
         except ValueError:
-            render("Escribe solo el número.", pedir_texto=True)
+            render("Escribe solo el número.", pedir_texto=True, teclado_numero=True)
             return
         ESTADO["paso"] = "moneda"
         render("¿Moneda?", [[("USD", "obj:moneda:USD"), ("USDT", "obj:moneda:USDT"), ("VES", "obj:moneda:VES")]])
@@ -1855,6 +1906,7 @@ def objetivo_guardar(datos, fecha_limite):
     con.close()
     terminar_flujo()
     extra = f", vence {fecha_limite}" if fecha_limite else ""
+    sonido("exito")
     render(f"Objetivo '{datos['nombre']}' creado: {datos['monto_meta']} {datos['moneda']}{extra}.", [[("Menú", "menu:main")]])
 
 
@@ -1875,6 +1927,7 @@ def objetivo_cumplido_confirmar(objetivo_id):
     con.execute("UPDATE objetivos SET estado='cumplido', monto_actual=monto_meta WHERE id=?", (objetivo_id,))
     con.commit()
     con.close()
+    sonido("exito")
     render("Objetivo marcado como cumplido.", [[("Menú", "menu:main")]])
 
 
@@ -1925,14 +1978,14 @@ def recordatorios_ajustar_menu():
 
 def recordatorios_ajustar_iniciar(tipo, item_id):
     iniciar_flujo("ajustar_aviso", "dias", {"tipo": tipo, "item_id": item_id})
-    render("¿Cuántos días antes te aviso?", pedir_texto=True)
+    render("¿Cuántos días antes te aviso?", pedir_texto=True, teclado_numero=True)
 
 
 def ajustar_aviso_texto(texto):
     try:
         dias = int(texto.strip())
     except ValueError:
-        render("Escribe solo el número de días.", pedir_texto=True)
+        render("Escribe solo el número de días.", pedir_texto=True, teclado_numero=True)
         return
     con = conectar()
     con.execute("INSERT INTO recordatorio_ajustes (tipo, item_id, dias_antes) VALUES (?,?,?) "
@@ -1941,6 +1994,7 @@ def ajustar_aviso_texto(texto):
     con.commit()
     con.close()
     terminar_flujo()
+    sonido("exito")
     render(f"Listo, te aviso {dias} días antes.", [[("Menú", "menu:main")]])
 
 
