@@ -50,7 +50,9 @@ _SONIDOS = {}
 
 
 def _cargar_sonido(nombre):
-    ruta = os.path.join(_SOUND_DIR, f"{nombre}.wav")
+    # Los archivos quedaron con inicial mayúscula al subirlos desde el teléfono
+    # (Click.wav, Exito.wav, Borrar.wav) -- se respeta ese nombre tal cual.
+    ruta = os.path.join(_SOUND_DIR, f"{nombre.capitalize()}.wav")
     if nombre not in _SONIDOS:
         _SONIDOS[nombre] = SoundLoader.load(ruta)
     return _SONIDOS[nombre]
@@ -416,7 +418,7 @@ def _con_cancelar(filas_botones):
     filas_botones = list(filas_botones) if filas_botones else []
     ya_tiene = any(cb == CANCELAR_CB for fila in filas_botones for _, cb in fila)
     if not ya_tiene:
-        filas_botones = filas_botones + [[("❌ Cancelar", CANCELAR_CB)]]
+        filas_botones = filas_botones + [[("X Cancelar", CANCELAR_CB)]]
     return filas_botones
 
 
