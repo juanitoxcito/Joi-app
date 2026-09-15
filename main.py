@@ -360,8 +360,10 @@ def probar_notificacion():
 
         request_permissions([Permission.POST_NOTIFICATIONS], _tras_permiso)
         render("Pidiendo permiso de notificaciones...", [])
-    except ImportError:
-        render("Esto solo funciona en el teléfono (Android), no en esta vista de prueba.",
+    except Exception as e:
+        import traceback
+        detalle = traceback.format_exc()
+        render(f"ERROR al probar notificación:\n\n{type(e).__name__}: {e}\n\n{detalle[-600:]}",
                [[("Menú", "menu:main")]])
 
 
@@ -459,7 +461,10 @@ def _boton(texto, on_press, color=COLOR_MORADO_OSCURO):
     b = BotonRedondeado(text=texto, size_hint_y=None, height=dp(48), color_fondo=color)
 
     def _con_sonido(inst):
-        sonido("click")
+        try:
+            sonido("click")
+        except Exception:
+            pass
         on_press(inst)
 
     b.bind(on_release=_con_sonido)
