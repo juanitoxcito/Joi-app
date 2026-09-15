@@ -9,7 +9,7 @@ requirements = python3,kivy
 orientation = portrait
 fullscreen = 0
 
-android.permissions = INTERNET
+android.permissions = INTERNET,POST_NOTIFICATIONS
 android.api = 33
 android.minapi = 24
 android.ndk = 25b
