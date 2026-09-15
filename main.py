@@ -308,6 +308,63 @@ def aplicar_estrategia_ingreso(con, monto_usdt):
     return lineas
 
 
+# ==================== NOTIFICACIONES (Android) ====================
+
+def mostrar_notificacion(titulo, mensaje):
+    """Muestra una notificación nativa de Android. No hace nada (solo lo
+    imprime) si se ejecuta fuera de Android, para poder probar en escritorio."""
+    try:
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        Context = autoclass("android.content.Context")
+        NotificationManager = autoclass("android.app.NotificationManager")
+        NotificationChannel = autoclass("android.app.NotificationChannel")
+        NotificationBuilder = autoclass("android.app.Notification$Builder")
+        Build = autoclass("android.os.Build")
+
+        activity = PythonActivity.mActivity
+        servicio = activity.getSystemService(Context.NOTIFICATION_SERVICE)
+        canal_id = "joi_canal"
+        if Build.VERSION.SDK_INT >= 26:
+            canal = NotificationChannel(canal_id, "Joi", NotificationManager.IMPORTANCE_HIGH)
+            servicio.createNotificationChannel(canal)
+            builder = NotificationBuilder(activity, canal_id)
+        else:
+            builder = NotificationBuilder(activity)
+        builder.setContentTitle(titulo)
+        builder.setContentText(mensaje)
+        builder.setSmallIcon(activity.getApplicationInfo().icon)
+        builder.setAutoCancel(True)
+        servicio.notify(1, builder.build())
+    except Exception as e:
+        print(f"[NOTIF] No se pudo mostrar (¿no es Android?): {e}")
+
+
+def probar_notificacion():
+    try:
+        from android.permissions import request_permissions, check_permission, Permission
+        if check_permission(Permission.POST_NOTIFICATIONS):
+            mostrar_notificacion("Joi", "¡Notificación de prueba! Si ves esto, funciona.")
+            render("Notificación enviada -- revisa la barra de notificaciones.", [[("Menú", "menu:main")]])
+            return
+
+        def _tras_permiso(permisos, resultados):
+            if resultados and resultados[0]:
+                mostrar_notificacion("Joi", "¡Notificación de prueba! Si ves esto, funciona.")
+                render("Permiso concedido y notificación enviada -- revisa la barra de notificaciones.",
+                       [[("Menú", "menu:main")]])
+            else:
+                render("No diste el permiso de notificaciones -- Joi no podrá avisarte más adelante. "
+                       "Puedes activarlo luego en Ajustes > Apps > Joi > Notificaciones.",
+                       [[("Menú", "menu:main")]])
+
+        request_permissions([Permission.POST_NOTIFICATIONS], _tras_permiso)
+        render("Pidiendo permiso de notificaciones...", [])
+    except ImportError:
+        render("Esto solo funciona en el teléfono (Android), no en esta vista de prueba.",
+               [[("Menú", "menu:main")]])
+
+
 # ==================== MOTOR DE PANTALLA (equivalente a enviar/editar de Telegram) ====================
 
 ESTADO = {"flujo": None, "paso": None, "datos": {}}
@@ -469,6 +526,9 @@ def manejar_callback(data):
     if data == "menu:main":
         terminar_flujo()
         menu_principal()
+        return
+    if data == "sys:probarnotif":
+        probar_notificacion()
         return
     if data == "menu:registrar":
         registrar_iniciar()
@@ -732,6 +792,7 @@ def menu_principal():
         [("Deudas", "menu:deudas"), ("Gastos fijos", "menu:pagosmensuales")],
         [("Recordatorios", "menu:recordatorios"), ("Saldo", "menu:saldo")],
         [("Resumen", "menu:resumen"), ("Objetivos", "menu:objetivos")],
+        [("Probar notificación", "sys:probarnotif")],
     ]
     render("¿Qué quieres hacer?", filas)
 
