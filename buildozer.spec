@@ -6,16 +6,18 @@ source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,ttf,wav
 version = 0.1
 requirements = python3,kivy
+
 orientation = portrait
 fullscreen = 0
 
-android.permissions = INTERNET,POST_NOTIFICATIONS
+android.permissions = INTERNET,POST_NOTIFICATIONS,SCHEDULE_EXACT_ALARM
 android.api = 33
 android.minapi = 24
 android.ndk = 25b
 android.accept_sdk_license = True
 android.archs = arm64-v8a
 p4a.branch = v2024.01.21
+services = joialarm:service.py
 
 [buildozer]
 log_level = 2
