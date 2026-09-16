@@ -319,12 +319,12 @@ def mostrar_notificacion(titulo, mensaje):
     NotificationManager = autoclass("android.app.NotificationManager")
     NotificationChannel = autoclass("android.app.NotificationChannel")
     NotificationBuilder = autoclass("android.app.Notification$Builder")
-    Build = autoclass("android.os.Build")
+    BuildVersion = autoclass("android.os.Build$VERSION")
 
     activity = PythonActivity.mActivity
     servicio = activity.getSystemService(Context.NOTIFICATION_SERVICE)
     canal_id = "joi_canal"
-    if Build.VERSION.SDK_INT >= 26:
+    if BuildVersion.SDK_INT >= 26:
         canal = NotificationChannel(canal_id, "Joi", NotificationManager.IMPORTANCE_HIGH)
         servicio.createNotificationChannel(canal)
         builder = NotificationBuilder(activity, canal_id)
