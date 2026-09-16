@@ -311,33 +311,30 @@ def aplicar_estrategia_ingreso(con, monto_usdt):
 # ==================== NOTIFICACIONES (Android) ====================
 
 def mostrar_notificacion(titulo, mensaje):
-    """Muestra una notificación nativa de Android. No hace nada (solo lo
-    imprime) si se ejecuta fuera de Android, para poder probar en escritorio."""
-    try:
-        from jnius import autoclass
-        PythonActivity = autoclass("org.kivy.android.PythonActivity")
-        Context = autoclass("android.content.Context")
-        NotificationManager = autoclass("android.app.NotificationManager")
-        NotificationChannel = autoclass("android.app.NotificationChannel")
-        NotificationBuilder = autoclass("android.app.Notification$Builder")
-        Build = autoclass("android.os.Build")
+    """Muestra una notificación nativa de Android. Deja que la excepción suba
+    (no la esconde) para que quien la llama pueda mostrar el error real."""
+    from jnius import autoclass
+    PythonActivity = autoclass("org.kivy.android.PythonActivity")
+    Context = autoclass("android.content.Context")
+    NotificationManager = autoclass("android.app.NotificationManager")
+    NotificationChannel = autoclass("android.app.NotificationChannel")
+    NotificationBuilder = autoclass("android.app.Notification$Builder")
+    Build = autoclass("android.os.Build")
 
-        activity = PythonActivity.mActivity
-        servicio = activity.getSystemService(Context.NOTIFICATION_SERVICE)
-        canal_id = "joi_canal"
-        if Build.VERSION.SDK_INT >= 26:
-            canal = NotificationChannel(canal_id, "Joi", NotificationManager.IMPORTANCE_HIGH)
-            servicio.createNotificationChannel(canal)
-            builder = NotificationBuilder(activity, canal_id)
-        else:
-            builder = NotificationBuilder(activity)
-        builder.setContentTitle(titulo)
-        builder.setContentText(mensaje)
-        builder.setSmallIcon(activity.getApplicationInfo().icon)
-        builder.setAutoCancel(True)
-        servicio.notify(1, builder.build())
-    except Exception as e:
-        print(f"[NOTIF] No se pudo mostrar (¿no es Android?): {e}")
+    activity = PythonActivity.mActivity
+    servicio = activity.getSystemService(Context.NOTIFICATION_SERVICE)
+    canal_id = "joi_canal"
+    if Build.VERSION.SDK_INT >= 26:
+        canal = NotificationChannel(canal_id, "Joi", NotificationManager.IMPORTANCE_HIGH)
+        servicio.createNotificationChannel(canal)
+        builder = NotificationBuilder(activity, canal_id)
+    else:
+        builder = NotificationBuilder(activity)
+    builder.setContentTitle(titulo)
+    builder.setContentText(mensaje)
+    builder.setSmallIcon(activity.getApplicationInfo().icon)
+    builder.setAutoCancel(True)
+    servicio.notify(1, builder.build())
 
 
 def probar_notificacion():
