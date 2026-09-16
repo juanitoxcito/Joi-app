@@ -137,6 +137,13 @@ def iniciar_db():
         colchon_actual REAL NOT NULL DEFAULT 0, estrategia_activa TEXT NOT NULL DEFAULT 'medium')""")
     if con.execute("SELECT COUNT(*) FROM config_estrategia").fetchone()[0] == 0:
         con.execute("INSERT INTO config_estrategia (id, colchon_meta, colchon_actual) VALUES (1, 150, 0)")
+    columnas_config = {f[1] for f in con.execute("PRAGMA table_info(config_estrategia)").fetchall()}
+    if "hora_manana" not in columnas_config:
+        con.execute("ALTER TABLE config_estrategia ADD COLUMN hora_manana TEXT NOT NULL DEFAULT '07:30'")
+    if "hora_mediodia" not in columnas_config:
+        con.execute("ALTER TABLE config_estrategia ADD COLUMN hora_mediodia TEXT NOT NULL DEFAULT '17:30'")
+    if "hora_noche" not in columnas_config:
+        con.execute("ALTER TABLE config_estrategia ADD COLUMN hora_noche TEXT NOT NULL DEFAULT '21:00'")
     con.commit()
     return con
 
@@ -364,6 +371,118 @@ def probar_notificacion():
                [[("Menú", "menu:main")]])
 
 
+# ==================== ALARMAS PROGRAMADAS (Android AlarmManager) ====================
+
+NOMBRE_PAQUETE_SERVICIO = None  # se calcula solo, ver _nombre_clase_servicio()
+
+
+def _nombre_clase_servicio():
+    """Nombre completo (paquete + clase) del servicio Java que Android genera
+    automáticamente a partir de 'services = joialarm:service.py' en buildozer.spec."""
+    from jnius import autoclass
+    PythonActivity = autoclass("org.kivy.android.PythonActivity")
+    activity = PythonActivity.mActivity
+    paquete = activity.getPackageName()
+    return f"{paquete}.ServiceJoialarm"
+
+
+def programar_alarma(slot, hora_str):
+    """Programa (o reprograma) la alarma diaria de un turno ('manana', 'mediodia'
+    o 'noche') a la hora dada (texto 'HH:MM'). Se dispara aunque la app esté cerrada."""
+    from jnius import autoclass
+    PythonActivity = autoclass("org.kivy.android.PythonActivity")
+    Context = autoclass("android.content.Context")
+    AlarmManager = autoclass("android.app.AlarmManager")
+    PendingIntent = autoclass("android.app.PendingIntent")
+    Calendar = autoclass("java.util.Calendar")
+    ServiceJoialarm = autoclass(_nombre_clase_servicio())
+
+    activity = PythonActivity.mActivity
+    intent = ServiceJoialarm.getDefaultIntent(activity, "", "Joi", "Aviso programado", slot)
+    codigo_peticion = {"manana": 100, "mediodia": 101, "noche": 102}[slot]
+    flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+    pendiente = PendingIntent.getService(activity, codigo_peticion, intent, flags)
+
+    hh, mm = map(int, hora_str.split(":"))
+    ahora = Calendar.getInstance()
+    objetivo = Calendar.getInstance()
+    objetivo.set(Calendar.HOUR_OF_DAY, hh)
+    objetivo.set(Calendar.MINUTE, mm)
+    objetivo.set(Calendar.SECOND, 0)
+    objetivo.set(Calendar.MILLISECOND, 0)
+    if objetivo.getTimeInMillis() <= ahora.getTimeInMillis():
+        objetivo.add(Calendar.DAY_OF_MONTH, 1)
+
+    gestor_alarmas = activity.getSystemService(Context.ALARM_SERVICE)
+    gestor_alarmas.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, objetivo.getTimeInMillis(), pendiente)
+
+
+def programar_todas_las_alarmas(mostrar_error_en_pantalla=False):
+    try:
+        con = conectar()
+        fila = con.execute(
+            "SELECT hora_manana, hora_mediodia, hora_noche FROM config_estrategia WHERE id=1").fetchone()
+        con.close()
+        hora_manana, hora_mediodia, hora_noche = fila
+        programar_alarma("manana", hora_manana)
+        programar_alarma("mediodia", hora_mediodia)
+        programar_alarma("noche", hora_noche)
+    except Exception as e:
+        if mostrar_error_en_pantalla:
+            import traceback
+            detalle = traceback.format_exc()
+            render(f"ERROR al programar las alarmas:\n\n{type(e).__name__}: {e}\n\n{detalle[-600:]}",
+                   [[("Menú", "menu:main")]])
+        else:
+            print(f"[ALARMAS] No se pudieron programar (¿no es Android?): {e}")
+
+
+# ==================== PANTALLA: HORARIOS DE AVISOS ====================
+
+def horarios_menu():
+    con = conectar()
+    fila = con.execute(
+        "SELECT hora_manana, hora_mediodia, hora_noche FROM config_estrategia WHERE id=1").fetchone()
+    con.close()
+    hora_manana, hora_mediodia, hora_noche = fila
+    texto = ("Horarios de tus avisos automáticos:\n\n"
+             f"Check-in de la mañana: {hora_manana}\n"
+             f"Corte de mediodía: {hora_mediodia}\n"
+             f"Cierre de la noche: {hora_noche}")
+    render(texto, [[("Cambiar mañana", "horario:editar:manana")],
+                   [("Cambiar mediodía", "horario:editar:mediodia")],
+                   [("Cambiar noche", "horario:editar:noche")],
+                   [("Volver", "menu:main")]])
+
+
+def horario_editar_iniciar(slot):
+    iniciar_flujo("horario_editar", "hora", {"slot": slot})
+    render("Escribe la nueva hora en formato 24h, ej: 07:30 o 21:00", pedir_texto=True)
+
+
+def horario_editar_texto(texto):
+    texto = texto.strip()
+    partes = texto.split(":")
+    valido = False
+    if len(partes) == 2 and partes[0].isdigit() and partes[1].isdigit():
+        hh, mm = int(partes[0]), int(partes[1])
+        if 0 <= hh <= 23 and 0 <= mm <= 59:
+            valido = True
+    if not valido:
+        render("Formato inválido. Escribe la hora como HH:MM en 24h, ej: 07:30 o 21:00", pedir_texto=True)
+        return
+    hora_normalizada = f"{hh:02d}:{mm:02d}"
+    slot = ESTADO["datos"]["slot"]
+    columna = {"manana": "hora_manana", "mediodia": "hora_mediodia", "noche": "hora_noche"}[slot]
+    con = conectar()
+    con.execute(f"UPDATE config_estrategia SET {columna}=? WHERE id=1", (hora_normalizada,))
+    con.commit()
+    con.close()
+    terminar_flujo()
+    programar_todas_las_alarmas(mostrar_error_en_pantalla=True)
+    render(f"Hora actualizada a {hora_normalizada}. Alarma reprogramada.", [[("Menú", "menu:main")]])
+
+
 # ==================== MOTOR DE PANTALLA (equivalente a enviar/editar de Telegram) ====================
 
 ESTADO = {"flujo": None, "paso": None, "datos": {}}
@@ -531,6 +650,12 @@ def manejar_callback(data):
         return
     if data == "sys:probarnotif":
         probar_notificacion()
+        return
+    if data == "sys:horarios":
+        horarios_menu()
+        return
+    if data.startswith("horario:editar:"):
+        horario_editar_iniciar(data.split(":")[2])
         return
     if data == "menu:registrar":
         registrar_iniciar()
@@ -780,6 +905,7 @@ def manejar_texto(texto):
         "prestamo": porcobrar_texto, "porcobrar_nuevo": porcobrar_texto,
         "pagado": pagado_texto, "ajustar_aviso": ajustar_aviso_texto,
         "saldo_editar": saldo_editar_texto,
+        "horario_editar": horario_editar_texto,
     }
     fn = despachadores.get(flujo)
     if fn:
@@ -795,6 +921,7 @@ def menu_principal():
         [("Recordatorios", "menu:recordatorios"), ("Saldo", "menu:saldo")],
         [("Resumen", "menu:resumen"), ("Objetivos", "menu:objetivos")],
         [("Probar notificación", "sys:probarnotif")],
+        [("Horarios de avisos", "sys:horarios")],
     ]
     render("¿Qué quieres hacer?", filas)
 
@@ -2116,6 +2243,7 @@ def resumen_mostrar(tipo, periodo):
 class JoiApp(App):
     def build(self):
         iniciar_db()
+        programar_todas_las_alarmas()
         sm = ScreenManager()
         global PANTALLA
         PANTALLA = MainScreen(name="main")
