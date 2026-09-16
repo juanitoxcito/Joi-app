@@ -139,11 +139,11 @@ def iniciar_db():
         con.execute("INSERT INTO config_estrategia (id, colchon_meta, colchon_actual) VALUES (1, 150, 0)")
     columnas_config = {f[1] for f in con.execute("PRAGMA table_info(config_estrategia)").fetchall()}
     if "hora_manana" not in columnas_config:
-        con.execute("ALTER TABLE config_estrategia ADD COLUMN hora_manana TEXT NOT NULL DEFAULT '07:30'")
+        con.execute("ALTER TABLE config_estrategia ADD COLUMN hora_manana TEXT")
     if "hora_mediodia" not in columnas_config:
-        con.execute("ALTER TABLE config_estrategia ADD COLUMN hora_mediodia TEXT NOT NULL DEFAULT '17:30'")
+        con.execute("ALTER TABLE config_estrategia ADD COLUMN hora_mediodia TEXT")
     if "hora_noche" not in columnas_config:
-        con.execute("ALTER TABLE config_estrategia ADD COLUMN hora_noche TEXT NOT NULL DEFAULT '21:00'")
+        con.execute("ALTER TABLE config_estrategia ADD COLUMN hora_noche TEXT")
     con.commit()
     return con
 
@@ -424,9 +424,12 @@ def programar_todas_las_alarmas(mostrar_error_en_pantalla=False):
             "SELECT hora_manana, hora_mediodia, hora_noche FROM config_estrategia WHERE id=1").fetchone()
         con.close()
         hora_manana, hora_mediodia, hora_noche = fila
-        programar_alarma("manana", hora_manana)
-        programar_alarma("mediodia", hora_mediodia)
-        programar_alarma("noche", hora_noche)
+        if hora_manana:
+            programar_alarma("manana", hora_manana)
+        if hora_mediodia:
+            programar_alarma("mediodia", hora_mediodia)
+        if hora_noche:
+            programar_alarma("noche", hora_noche)
     except Exception as e:
         if mostrar_error_en_pantalla:
             import traceback
@@ -439,6 +442,18 @@ def programar_todas_las_alarmas(mostrar_error_en_pantalla=False):
 
 # ==================== PANTALLA: HORARIOS DE AVISOS ====================
 
+def _hora24_a_texto12(hora24):
+    """Convierte 'HH:MM' (24h) a texto '7:30 AM' para mostrar. None -> 'Sin configurar'."""
+    if not hora24:
+        return "Sin configurar"
+    hh, mm = map(int, hora24.split(":"))
+    periodo = "AM" if hh < 12 else "PM"
+    hh12 = hh % 12
+    if hh12 == 0:
+        hh12 = 12
+    return f"{hh12}:{mm:02d} {periodo}"
+
+
 def horarios_menu():
     con = conectar()
     fila = con.execute(
@@ -446,9 +461,9 @@ def horarios_menu():
     con.close()
     hora_manana, hora_mediodia, hora_noche = fila
     texto = ("Horarios de tus avisos automáticos:\n\n"
-             f"Check-in de la mañana: {hora_manana}\n"
-             f"Corte de mediodía: {hora_mediodia}\n"
-             f"Cierre de la noche: {hora_noche}")
+             f"Check-in de la mañana: {_hora24_a_texto12(hora_manana)}\n"
+             f"Corte de mediodía: {_hora24_a_texto12(hora_mediodia)}\n"
+             f"Cierre de la noche: {_hora24_a_texto12(hora_noche)}")
     render(texto, [[("Cambiar mañana", "horario:editar:manana")],
                    [("Cambiar mediodía", "horario:editar:mediodia")],
                    [("Cambiar noche", "horario:editar:noche")],
@@ -457,22 +472,42 @@ def horarios_menu():
 
 def horario_editar_iniciar(slot):
     iniciar_flujo("horario_editar", "hora", {"slot": slot})
-    render("Escribe la nueva hora en formato 24h, ej: 07:30 o 21:00", pedir_texto=True)
+    render("¿A qué hora? Escribe un número del 1 al 12.", pedir_texto=True, teclado_numero=True)
 
 
 def horario_editar_texto(texto):
-    texto = texto.strip()
-    partes = texto.split(":")
-    valido = False
-    if len(partes) == 2 and partes[0].isdigit() and partes[1].isdigit():
-        hh, mm = int(partes[0]), int(partes[1])
-        if 0 <= hh <= 23 and 0 <= mm <= 59:
-            valido = True
-    if not valido:
-        render("Formato inválido. Escribe la hora como HH:MM en 24h, ej: 07:30 o 21:00", pedir_texto=True)
+    d = ESTADO["datos"]
+    paso = ESTADO["paso"]
+    if paso == "hora":
+        texto = texto.strip()
+        if not texto.isdigit() or not (1 <= int(texto) <= 12):
+            render("Escribe un número del 1 al 12.", pedir_texto=True, teclado_numero=True)
+            return
+        d["hora12"] = int(texto)
+        ESTADO["paso"] = "minuto"
+        render("¿Y los minutos? Escribe un número del 0 al 59 (usa 0 para en punto).",
+               pedir_texto=True, teclado_numero=True)
         return
-    hora_normalizada = f"{hh:02d}:{mm:02d}"
-    slot = ESTADO["datos"]["slot"]
+    if paso == "minuto":
+        texto = texto.strip()
+        if not texto.isdigit() or not (0 <= int(texto) <= 59):
+            render("Escribe un número del 0 al 59.", pedir_texto=True, teclado_numero=True)
+            return
+        d["minuto"] = int(texto)
+        ESTADO["paso"] = "periodo"
+        render("¿AM o PM?", [[("AM", "horario:periodo:AM"), ("PM", "horario:periodo:PM")]])
+        return
+
+
+def horario_periodo_callback(periodo):
+    d = ESTADO["datos"]
+    hh12, mm = d["hora12"], d["minuto"]
+    if periodo == "AM":
+        hh24 = 0 if hh12 == 12 else hh12
+    else:
+        hh24 = 12 if hh12 == 12 else hh12 + 12
+    hora_normalizada = f"{hh24:02d}:{mm:02d}"
+    slot = d["slot"]
     columna = {"manana": "hora_manana", "mediodia": "hora_mediodia", "noche": "hora_noche"}[slot]
     con = conectar()
     con.execute(f"UPDATE config_estrategia SET {columna}=? WHERE id=1", (hora_normalizada,))
@@ -480,7 +515,8 @@ def horario_editar_texto(texto):
     con.close()
     terminar_flujo()
     programar_todas_las_alarmas(mostrar_error_en_pantalla=True)
-    render(f"Hora actualizada a {hora_normalizada}. Alarma reprogramada.", [[("Menú", "menu:main")]])
+    render(f"Hora actualizada a {_hora24_a_texto12(hora_normalizada)}. Alarma reprogramada.",
+           [[("Menú", "menu:main")]])
 
 
 # ==================== MOTOR DE PANTALLA (equivalente a enviar/editar de Telegram) ====================
@@ -656,6 +692,9 @@ def manejar_callback(data):
         return
     if data.startswith("horario:editar:"):
         horario_editar_iniciar(data.split(":")[2])
+        return
+    if data.startswith("horario:periodo:"):
+        horario_periodo_callback(data.split(":")[2])
         return
     if data == "menu:registrar":
         registrar_iniciar()
