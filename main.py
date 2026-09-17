@@ -144,6 +144,12 @@ def iniciar_db():
         con.execute("ALTER TABLE config_estrategia ADD COLUMN hora_mediodia TEXT")
     if "hora_noche" not in columnas_config:
         con.execute("ALTER TABLE config_estrategia ADD COLUMN hora_noche TEXT")
+    con.execute("""CREATE TABLE IF NOT EXISTS config_sueldo (
+        id INTEGER PRIMARY KEY CHECK (id=1), activo INTEGER NOT NULL DEFAULT 0,
+        frecuencia TEXT, monto REAL, moneda TEXT, cuenta_id INTEGER,
+        dia_semana INTEGER, dia_mes INTEGER, ultima_confirmacion TEXT)""")
+    if con.execute("SELECT COUNT(*) FROM config_sueldo").fetchone()[0] == 0:
+        con.execute("INSERT INTO config_sueldo (id, activo) VALUES (1, 0)")
     con.commit()
     return con
 
@@ -440,6 +446,215 @@ def programar_todas_las_alarmas(mostrar_error_en_pantalla=False):
             print(f"[ALARMAS] No se pudieron programar (¿no es Android?): {e}")
 
 
+# ==================== MÓDULO: SUELDO ====================
+
+def sueldo_pendiente_hoy(con):
+    fila = con.execute(
+        "SELECT activo, frecuencia, dia_semana, dia_mes, ultima_confirmacion FROM config_sueldo WHERE id=1").fetchone()
+    if not fila or not fila[0]:
+        return False
+    _, frecuencia, dia_semana, dia_mes, ultima_confirmacion = fila
+    hoy = datetime.now(UTC_MENOS_4)
+    if ultima_confirmacion == hoy.strftime("%Y-%m-%d"):
+        return False
+    if frecuencia == "diario":
+        return True
+    if frecuencia == "semanal":
+        return hoy.weekday() == dia_semana
+    if frecuencia == "mensual":
+        return hoy.day == dia_mes
+    return False
+
+
+def sueldo_confirmar_prompt():
+    render("¿Ya te depositaron el sueldo hoy?", [[("Sí", "sueldo:confirmar:si"), ("No", "sueldo:confirmar:no")]])
+
+
+def sueldo_confirmar_callback(respuesta):
+    if respuesta == "no":
+        con = conectar()
+        hoy_str = datetime.now(UTC_MENOS_4).strftime("%Y-%m-%d")
+        con.execute("UPDATE config_sueldo SET ultima_confirmacion=? WHERE id=1", (hoy_str,))
+        con.commit()
+        con.close()
+        render("Entendido, no se registró nada. Te preguntaré de nuevo el próximo día que toque.",
+               [[("Menú", "menu:main")]])
+        return
+    con = conectar()
+    monto, moneda, cuenta_id = con.execute(
+        "SELECT monto, moneda, cuenta_id FROM config_sueldo WHERE id=1").fetchone()
+    con.close()
+    ESTADO["datos"] = {"monto": monto, "moneda": moneda, "cuenta_destino_id": cuenta_id}
+    render(f"¿De dónde salió el pago de {monto} {moneda}?",
+           [[("Cuenta interna", "sueldo:origen:interna"), ("Externa", "sueldo:origen:externa")]])
+
+
+def sueldo_origen_callback(tipo):
+    if tipo == "externa":
+        sueldo_aplicar(None)
+        return
+    d = ESTADO["datos"]
+    filas = [[(c["nombre"], f"sueldo:origeninterno:{c['id']}")]
+             for c in listar_cuentas_simples() if c["id"] != d["cuenta_destino_id"]]
+    if not filas:
+        render("No tienes otra cuenta de dónde elegir -- usando externa.", [])
+        sueldo_aplicar(None)
+        return
+    render("¿De cuál de tus cuentas salió?", filas)
+
+
+def sueldo_aplicar(cuenta_origen_id):
+    d = ESTADO["datos"]
+    con = conectar()
+    hoy_str = datetime.now(UTC_MENOS_4).strftime("%Y-%m-%d")
+    cuenta_destino = con.execute("SELECT nombre, saldo, moneda FROM cuentas WHERE id=?",
+                                 (d["cuenta_destino_id"],)).fetchone()
+    if not cuenta_destino:
+        con.close()
+        render("La cuenta configurada para el sueldo ya no existe. Ve a Sueldo para elegir otra.",
+               [[("Menú", "menu:main")]])
+        return
+    monto_usdt = convertir_a_usdt(d["monto"], d["moneda"])
+    ahora = datetime.now(UTC_MENOS_4).isoformat()
+    delta_destino_moneda = monto_usdt * obtener_tasas()["paralelo"] if cuenta_destino[2] == "VES" else monto_usdt
+    nuevo_saldo_destino = cuenta_destino[1] + delta_destino_moneda
+    con.execute("UPDATE cuentas SET saldo=? WHERE id=?", (nuevo_saldo_destino, d["cuenta_destino_id"]))
+    con.execute("INSERT INTO movimientos (fecha, tipo, monto, moneda, monto_usdt, categoria, cuenta_id) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (ahora, "ingreso", d["monto"], d["moneda"], monto_usdt, "Ingreso", d["cuenta_destino_id"]))
+    texto_origen = ""
+    if cuenta_origen_id:
+        cuenta_origen = con.execute("SELECT nombre, saldo, moneda FROM cuentas WHERE id=?",
+                                    (cuenta_origen_id,)).fetchone()
+        delta_origen_moneda = monto_usdt * obtener_tasas()["paralelo"] if cuenta_origen[2] == "VES" else monto_usdt
+        nuevo_saldo_origen = cuenta_origen[1] - delta_origen_moneda
+        con.execute("UPDATE cuentas SET saldo=? WHERE id=?", (nuevo_saldo_origen, cuenta_origen_id))
+        con.execute("INSERT INTO movimientos (fecha, tipo, monto, moneda, monto_usdt, categoria, cuenta_id) "
+                    "VALUES (?,'gasto',?,?,?,?,?)",
+                    (ahora, round(delta_origen_moneda, 2), cuenta_origen[2], monto_usdt, "Transferencia",
+                     cuenta_origen_id))
+        texto_origen = f" (salió de {cuenta_origen[0]}, nuevo saldo {round(nuevo_saldo_origen, 2)} {cuenta_origen[2]})"
+    lineas_estrategia = aplicar_estrategia_ingreso(con, monto_usdt)
+    con.execute("UPDATE config_sueldo SET ultima_confirmacion=? WHERE id=1", (hoy_str,))
+    con.commit()
+    con.close()
+    terminar_flujo()
+    texto = (f"Sueldo registrado: {d['monto']} {d['moneda']} en {cuenta_destino[0]}{texto_origen}.\n"
+             f"Nuevo saldo {cuenta_destino[0]}: {round(nuevo_saldo_destino, 2)} {cuenta_destino[2]}")
+    if lineas_estrategia:
+        texto += "\n\nRepartido según tu estrategia:\n" + "\n".join(lineas_estrategia)
+    sonido("exito")
+    render(texto, [[("Menú", "menu:main")]])
+
+
+def sueldo_menu():
+    con = conectar()
+    fila = con.execute(
+        "SELECT activo, frecuencia, monto, moneda, cuenta_id, dia_semana, dia_mes FROM config_sueldo WHERE id=1"
+    ).fetchone()
+    activo, frecuencia, monto, moneda, cuenta_id, dia_semana, dia_mes = fila
+    if not activo:
+        texto = "El sueldo no está configurado."
+    else:
+        cuenta = con.execute("SELECT nombre FROM cuentas WHERE id=?", (cuenta_id,)).fetchone()
+        cuenta_nombre = cuenta[0] if cuenta else "cuenta eliminada"
+        extra = f", cada {DIAS_SEMANA[dia_semana]}" if frecuencia == "semanal" else \
+            (f", día {dia_mes}" if frecuencia == "mensual" else "")
+        texto = f"Sueldo configurado: {monto} {moneda} ({frecuencia}{extra}) -> {cuenta_nombre}"
+    con.close()
+    filas = [[("Configurar/Editar", "sueldo:config:frecuencia")]]
+    if activo:
+        filas.append([("Confirmar ahora", "sueldo:confirmarahora")])
+        filas.append([("Desactivar", "sueldo:desactivar")])
+    filas.append([("Volver", "menu:main")])
+    render(texto, filas)
+
+
+def sueldo_config_frecuencia():
+    render("¿Cada cuánto te pagan?",
+           [[("Diario", "sueldo:frecuencia:diario"), ("Semanal", "sueldo:frecuencia:semanal"),
+             ("Mensual", "sueldo:frecuencia:mensual")]])
+
+
+def sueldo_frecuencia_callback(frecuencia):
+    iniciar_flujo("sueldo_config", "monto", {"frecuencia": frecuencia})
+    render("¿Cuánto es el sueldo?", pedir_texto=True, teclado_numero=True)
+
+
+def sueldo_config_texto(texto):
+    d = ESTADO["datos"]
+    if ESTADO["paso"] == "monto":
+        try:
+            d["monto"] = parsear_monto(texto)
+        except ValueError:
+            render("Escribe solo el número.", pedir_texto=True, teclado_numero=True)
+            return
+        ESTADO["paso"] = "moneda"
+        render("¿Moneda?", [[("USD", "sueldo:moneda:USD"), ("USDT", "sueldo:moneda:USDT"), ("VES", "sueldo:moneda:VES")]])
+        return
+    if ESTADO["paso"] == "dia_mes":
+        try:
+            dia = int(texto.strip())
+            assert 1 <= dia <= 31
+        except (ValueError, AssertionError):
+            render("Escribe un número de día válido (1-31).", pedir_texto=True, teclado_numero=True)
+            return
+        d["dia_mes"] = dia
+        ESTADO["paso"] = "cuenta"
+        filas = [[(c["nombre"], f"sueldo:cuenta:{c['id']}")] for c in listar_cuentas_simples()]
+        render("¿A qué cuenta entra?", filas)
+        return
+
+
+def sueldo_moneda_callback(moneda):
+    d = ESTADO["datos"]
+    d["moneda"] = moneda
+    if d["frecuencia"] == "semanal":
+        ESTADO["paso"] = "dia_semana"
+        filas = [[(dd, f"sueldo:diasemana:{i}")] for i, dd in enumerate(DIAS_SEMANA)]
+        render("¿Qué día de la semana?", filas)
+    elif d["frecuencia"] == "mensual":
+        ESTADO["paso"] = "dia_mes"
+        render("¿Qué día del mes? (1-31)", pedir_texto=True, teclado_numero=True)
+    else:
+        ESTADO["paso"] = "cuenta"
+        filas = [[(c["nombre"], f"sueldo:cuenta:{c['id']}")] for c in listar_cuentas_simples()]
+        render("¿A qué cuenta entra?", filas)
+
+
+def sueldo_diasemana_callback(dia_semana):
+    ESTADO["datos"]["dia_semana"] = dia_semana
+    ESTADO["paso"] = "cuenta"
+    filas = [[(c["nombre"], f"sueldo:cuenta:{c['id']}")] for c in listar_cuentas_simples()]
+    render("¿A qué cuenta entra?", filas)
+
+
+def sueldo_cuenta_callback(cuenta_id):
+    d = ESTADO["datos"]
+    con = conectar()
+    con.execute("UPDATE config_sueldo SET activo=1, frecuencia=?, monto=?, moneda=?, cuenta_id=?, "
+                "dia_semana=?, dia_mes=?, ultima_confirmacion=NULL WHERE id=1",
+                (d["frecuencia"], d["monto"], d["moneda"], cuenta_id, d.get("dia_semana"), d.get("dia_mes")))
+    con.commit()
+    con.close()
+    terminar_flujo()
+    sonido("exito")
+    render("Sueldo configurado. Te preguntaré en el check-in de la mañana cuando corresponda.",
+           [[("Menú", "menu:main")]])
+
+
+def sueldo_confirmar_ahora():
+    sueldo_confirmar_prompt()
+
+
+def sueldo_desactivar():
+    con = conectar()
+    con.execute("UPDATE config_sueldo SET activo=0 WHERE id=1")
+    con.commit()
+    con.close()
+    render("Sueldo desactivado.", [[("Menú", "menu:main")]])
+
+
 # ==================== PANTALLA: HORARIOS DE AVISOS ====================
 
 def _hora24_a_texto12(hora24):
@@ -567,7 +782,7 @@ class MainScreen(Screen):
 
         self.add_widget(raiz)
         render(saludo())
-        menu_principal()
+        pantalla_inicio()
 
     def _actualizar_bg(self, *_):
         self._bg.pos = self.pos
@@ -689,6 +904,39 @@ def manejar_callback(data):
         return
     if data == "sys:horarios":
         horarios_menu()
+        return
+    if data == "sys:sueldo":
+        sueldo_menu()
+        return
+    if data.startswith("sueldo:confirmar:"):
+        sueldo_confirmar_callback(data.split(":")[2])
+        return
+    if data.startswith("sueldo:origen:"):
+        sueldo_origen_callback(data.split(":")[2])
+        return
+    if data.startswith("sueldo:origeninterno:"):
+        sueldo_aplicar(int(data.split(":")[2]))
+        return
+    if data == "sueldo:config:frecuencia":
+        sueldo_config_frecuencia()
+        return
+    if data.startswith("sueldo:frecuencia:"):
+        sueldo_frecuencia_callback(data.split(":")[2])
+        return
+    if data.startswith("sueldo:moneda:"):
+        sueldo_moneda_callback(data.split(":")[2])
+        return
+    if data.startswith("sueldo:diasemana:"):
+        sueldo_diasemana_callback(int(data.split(":")[2]))
+        return
+    if data.startswith("sueldo:cuenta:"):
+        sueldo_cuenta_callback(int(data.split(":")[2]))
+        return
+    if data == "sueldo:confirmarahora":
+        sueldo_confirmar_ahora()
+        return
+    if data == "sueldo:desactivar":
+        sueldo_desactivar()
         return
     if data.startswith("horario:editar:"):
         horario_editar_iniciar(data.split(":")[2])
@@ -945,6 +1193,7 @@ def manejar_texto(texto):
         "pagado": pagado_texto, "ajustar_aviso": ajustar_aviso_texto,
         "saldo_editar": saldo_editar_texto,
         "horario_editar": horario_editar_texto,
+        "sueldo_config": sueldo_config_texto,
     }
     fn = despachadores.get(flujo)
     if fn:
@@ -953,14 +1202,26 @@ def manejar_texto(texto):
 
 # ==================== MENÚ PRINCIPAL ====================
 
+def pantalla_inicio():
+    """Al abrir la app: si toca confirmar el sueldo hoy, pregunta eso primero;
+    si no, va directo al menú principal."""
+    con = conectar()
+    pendiente = sueldo_pendiente_hoy(con)
+    con.close()
+    if pendiente:
+        sueldo_confirmar_prompt()
+    else:
+        menu_principal()
+
+
 def menu_principal():
     filas = [
         [("Registrar", "menu:registrar"), ("Por cobrar", "menu:porcobrar")],
         [("Deudas", "menu:deudas"), ("Gastos fijos", "menu:pagosmensuales")],
         [("Recordatorios", "menu:recordatorios"), ("Saldo", "menu:saldo")],
         [("Resumen", "menu:resumen"), ("Objetivos", "menu:objetivos")],
-        [("Probar notificación", "sys:probarnotif")],
         [("Horarios de avisos", "sys:horarios")],
+        [("Sueldo", "sys:sueldo")],
     ]
     render("¿Qué quieres hacer?", filas)
 
@@ -1401,6 +1662,16 @@ def deuda_nueva_texto(texto):
             render("Escribe solo el número, ej: 10 para 10%.", pedir_texto=True, teclado_numero=True)
             return
         con = conectar()
+        saldo_actual = estatus_calcular(con)["saldo_total_usdt"]
+        if saldo_actual <= 0:
+            con.close()
+            render("Todavía no tienes ningún saldo registrado (tu liquidez actual es $0), así que no "
+                   "puedo calcular una recomendación real -- necesito saber con cuánto cuentas primero.\n\n"
+                   "Puedes configurar tu saldo ahora, o elegir tú mismo la estrategia y seguir con la deuda.",
+                   [[("Elegir yo la estrategia", "deuda:elegirestrategia")],
+                    [("Configurar saldo primero", "menu:saldo")],
+                    [("Menú", "menu:main")]])
+            return
         recomendada, estatus, deuda_total, ingreso_30d = deuda_recomendar_estrategia(
             con, convertir_a_usdt(d["monto_total"], d["moneda"]))
         con.close()
