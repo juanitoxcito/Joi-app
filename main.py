@@ -152,6 +152,9 @@ def iniciar_db():
         dia_semana INTEGER, dia_mes INTEGER, ultima_confirmacion TEXT)""")
     if con.execute("SELECT COUNT(*) FROM config_sueldo").fetchone()[0] == 0:
         con.execute("INSERT INTO config_sueldo (id, activo) VALUES (1, 0)")
+    columnas_sueldo = {f[1] for f in con.execute("PRAGMA table_info(config_sueldo)").fetchall()}
+    if "cuenta_origen_id" not in columnas_sueldo:
+        con.execute("ALTER TABLE config_sueldo ADD COLUMN cuenta_origen_id INTEGER")
     con.commit()
     return con
 
@@ -243,7 +246,24 @@ def calcular_costo_semanal_usdt(con):
     for monto, moneda, frecuencia in con.execute(
             "SELECT monto, moneda, frecuencia FROM pagos_mensuales WHERE activo=1").fetchall():
         usdt = convertir_a_usdt(monto, moneda)
-        total += usdt * 7 if frecuencia == "diario" else usdt / 4.33
+        if frecuencia == "diario":
+            total += usdt * 7
+        elif frecuencia == "semanal":
+            total += usdt
+        else:
+            total += usdt / 4.33
+    fila_sueldo = con.execute(
+        "SELECT activo, frecuencia, monto, moneda, cuenta_origen_id FROM config_sueldo WHERE id=1").fetchone()
+    if fila_sueldo:
+        s_activo, s_frecuencia, s_monto, s_moneda, s_cuenta_origen_id = fila_sueldo
+        if s_activo and s_cuenta_origen_id and s_monto:
+            s_usdt = convertir_a_usdt(s_monto, s_moneda)
+            if s_frecuencia == "diario":
+                total += s_usdt * 7
+            elif s_frecuencia == "semanal":
+                total += s_usdt
+            elif s_frecuencia == "mensual":
+                total += s_usdt / 4.33
     return total
 
 
@@ -487,40 +507,52 @@ def sueldo_pendiente_hoy(con):
 
 
 def sueldo_confirmar_prompt():
-    render("¿Ya te depositaron el sueldo hoy?", [[("Sí", "sueldo:confirmar:si"), ("No", "sueldo:confirmar:no")]])
+    con = conectar()
+    monto, moneda = con.execute("SELECT monto, moneda FROM config_sueldo WHERE id=1").fetchone()
+    con.close()
+    render(f"¿Transferiste tus {monto} {moneda} del sueldo hoy?",
+           [[("Sí, completo", "sueldo:confirmar:si"), ("No", "sueldo:confirmar:no")],
+            [("Otra cantidad (reciclaje)", "sueldo:confirmar:editar")]])
 
 
 def sueldo_confirmar_callback(respuesta):
+    con = conectar()
+    hoy_str = datetime.now(UTC_MENOS_4).strftime("%Y-%m-%d")
     if respuesta == "no":
-        con = conectar()
-        hoy_str = datetime.now(UTC_MENOS_4).strftime("%Y-%m-%d")
         con.execute("UPDATE config_sueldo SET ultima_confirmacion=? WHERE id=1", (hoy_str,))
         con.commit()
         con.close()
         render("Entendido, no se registró nada. Te preguntaré de nuevo el próximo día que toque.",
                [[("Menú", "menu:main")]])
         return
-    con = conectar()
-    monto, moneda, cuenta_id = con.execute(
-        "SELECT monto, moneda, cuenta_id FROM config_sueldo WHERE id=1").fetchone()
+    if respuesta == "editar":
+        con.close()
+        iniciar_flujo("sueldo_editar_monto_dia", "monto", {})
+        render("¿Cuánto vas a transferir hoy? (usa un monto menor si estás reciclando saldo del día anterior, "
+               "o 0 si no vas a transferir nada)", pedir_texto=True, teclado_numero=True)
+        return
+    monto, moneda, cuenta_id, cuenta_origen_id = con.execute(
+        "SELECT monto, moneda, cuenta_id, cuenta_origen_id FROM config_sueldo WHERE id=1").fetchone()
     con.close()
     ESTADO["datos"] = {"monto": monto, "moneda": moneda, "cuenta_destino_id": cuenta_id}
-    render(f"¿De dónde salió el pago de {monto} {moneda}?",
-           [[("Cuenta interna", "sueldo:origen:interna"), ("Externa", "sueldo:origen:externa")]])
+    sueldo_aplicar(cuenta_origen_id)
 
 
-def sueldo_origen_callback(tipo):
-    if tipo == "externa":
-        sueldo_aplicar(None)
+def sueldo_editar_monto_dia_texto(texto):
+    try:
+        monto_dia = parsear_monto(texto)
+    except ValueError:
+        render("Escribe solo el número.", pedir_texto=True, teclado_numero=True)
         return
-    d = ESTADO["datos"]
-    filas = [[(c["nombre"], f"sueldo:origeninterno:{c['id']}")]
-             for c in listar_cuentas_simples() if c["id"] != d["cuenta_destino_id"]]
-    if not filas:
-        render("No tienes otra cuenta de dónde elegir -- usando externa.", [])
-        sueldo_aplicar(None)
+    if monto_dia < 0:
+        render("El monto no puede ser negativo.", pedir_texto=True, teclado_numero=True)
         return
-    render("¿De cuál de tus cuentas salió?", filas)
+    con = conectar()
+    moneda, cuenta_id, cuenta_origen_id = con.execute(
+        "SELECT moneda, cuenta_id, cuenta_origen_id FROM config_sueldo WHERE id=1").fetchone()
+    con.close()
+    ESTADO["datos"] = {"monto": monto_dia, "moneda": moneda, "cuenta_destino_id": cuenta_id}
+    sueldo_aplicar(cuenta_origen_id)
 
 
 def sueldo_aplicar(cuenta_origen_id):
@@ -570,9 +602,10 @@ def sueldo_aplicar(cuenta_origen_id):
 def sueldo_menu():
     con = conectar()
     fila = con.execute(
-        "SELECT activo, frecuencia, monto, moneda, cuenta_id, dia_semana, dia_mes FROM config_sueldo WHERE id=1"
+        "SELECT activo, frecuencia, monto, moneda, cuenta_id, dia_semana, dia_mes, cuenta_origen_id "
+        "FROM config_sueldo WHERE id=1"
     ).fetchone()
-    activo, frecuencia, monto, moneda, cuenta_id, dia_semana, dia_mes = fila
+    activo, frecuencia, monto, moneda, cuenta_id, dia_semana, dia_mes, cuenta_origen_id = fila
     if not activo:
         texto = "El sueldo no está configurado."
     else:
@@ -580,13 +613,18 @@ def sueldo_menu():
         cuenta_nombre = cuenta[0] if cuenta else "cuenta eliminada"
         extra = f", cada {DIAS_SEMANA[dia_semana]}" if frecuencia == "semanal" else \
             (f", día {dia_mes}" if frecuencia == "mensual" else "")
-        texto = f"Sueldo configurado: {monto} {moneda} ({frecuencia}{extra}) -> {cuenta_nombre}"
+        if cuenta_origen_id:
+            origen = con.execute("SELECT nombre FROM cuentas WHERE id=?", (cuenta_origen_id,)).fetchone()
+            origen_texto = f", sale de {origen[0]}" if origen else ", sale de una cuenta eliminada"
+        else:
+            origen_texto = ", de fuente externa"
+        texto = f"Sueldo configurado: {monto} {moneda} ({frecuencia}{extra}) -> {cuenta_nombre}{origen_texto}"
     con.close()
     filas = [[("Configurar/Editar", "sueldo:config:frecuencia")]]
     if activo:
         filas.append([("Confirmar ahora", "sueldo:confirmarahora")])
         filas.append([("Desactivar", "sueldo:desactivar")])
-    filas.append([("Volver", "menu:main")])
+    filas.append([("Volver", "menu:saldo")])
     render(texto, filas)
 
 
@@ -648,15 +686,38 @@ def sueldo_diasemana_callback(dia_semana):
 
 def sueldo_cuenta_callback(cuenta_id):
     d = ESTADO["datos"]
+    d["cuenta_id"] = cuenta_id
+    render("¿De qué cuenta sale ese dinero, o es de fuente externa?",
+           [[("Cuenta interna", "sueldo:configorigen:interna"), ("Externa", "sueldo:configorigen:externa")]])
+
+
+def sueldo_config_origen_callback(tipo):
+    if tipo == "externa":
+        sueldo_config_guardar(None)
+        return
+    d = ESTADO["datos"]
+    filas = [[(c["nombre"], f"sueldo:configorigeninterno:{c['id']}")]
+             for c in listar_cuentas_simples() if c["id"] != d["cuenta_id"]]
+    if not filas:
+        render("No tienes otra cuenta de dónde elegir -- se guardará como externa.", [])
+        sueldo_config_guardar(None)
+        return
+    render("¿De cuál de tus cuentas sale?", filas)
+
+
+def sueldo_config_guardar(cuenta_origen_id):
+    d = ESTADO["datos"]
     con = conectar()
     con.execute("UPDATE config_sueldo SET activo=1, frecuencia=?, monto=?, moneda=?, cuenta_id=?, "
-                "dia_semana=?, dia_mes=?, ultima_confirmacion=NULL WHERE id=1",
-                (d["frecuencia"], d["monto"], d["moneda"], cuenta_id, d.get("dia_semana"), d.get("dia_mes")))
+                "dia_semana=?, dia_mes=?, cuenta_origen_id=?, ultima_confirmacion=NULL WHERE id=1",
+                (d["frecuencia"], d["monto"], d["moneda"], d["cuenta_id"], d.get("dia_semana"),
+                 d.get("dia_mes"), cuenta_origen_id))
     con.commit()
     con.close()
     terminar_flujo()
     sonido("exito")
-    render("Sueldo configurado. Te preguntaré en el check-in de la mañana cuando corresponda.",
+    extra = " Esto también se contará como un gasto fijo recurrente al calcular tu Estatus." if cuenta_origen_id else ""
+    render(f"Sueldo configurado. Te preguntaré en el check-in de la mañana cuando corresponda.{extra}",
            [[("Menú", "menu:main")]])
 
 
@@ -699,7 +760,7 @@ def horarios_menu():
     render(texto, [[("Cambiar mañana", "horario:editar:manana")],
                    [("Cambiar mediodía", "horario:editar:mediodia")],
                    [("Cambiar noche", "horario:editar:noche")],
-                   [("Volver", "menu:main")]])
+                   [("Volver", "menu:recordatorios")]])
 
 
 def horario_editar_iniciar(slot):
@@ -1035,12 +1096,6 @@ def manejar_callback(data):
     if data.startswith("sueldo:confirmar:"):
         sueldo_confirmar_callback(data.split(":")[2])
         return
-    if data.startswith("sueldo:origen:"):
-        sueldo_origen_callback(data.split(":")[2])
-        return
-    if data.startswith("sueldo:origeninterno:"):
-        sueldo_aplicar(int(data.split(":")[2]))
-        return
     if data == "sueldo:config:frecuencia":
         sueldo_config_frecuencia()
         return
@@ -1055,6 +1110,12 @@ def manejar_callback(data):
         return
     if data.startswith("sueldo:cuenta:"):
         sueldo_cuenta_callback(int(data.split(":")[2]))
+        return
+    if data.startswith("sueldo:configorigen:"):
+        sueldo_config_origen_callback(data.split(":")[2])
+        return
+    if data.startswith("sueldo:configorigeninterno:"):
+        sueldo_config_guardar(int(data.split(":")[2]))
         return
     if data == "sueldo:confirmarahora":
         sueldo_confirmar_ahora()
@@ -1321,6 +1382,7 @@ def manejar_texto(texto):
         "saldo_editar": saldo_editar_texto,
         "horario_editar": horario_editar_texto,
         "sueldo_config": sueldo_config_texto,
+        "sueldo_editar_monto_dia": sueldo_editar_monto_dia_texto,
     }
     fn = despachadores.get(flujo)
     if fn:
@@ -1347,8 +1409,6 @@ def menu_principal():
         [("Deudas", "menu:deudas"), ("Gastos fijos", "menu:pagosmensuales")],
         [("Recordatorios", "menu:recordatorios"), ("Saldo", "menu:saldo")],
         [("Resumen", "menu:resumen"), ("Objetivos", "menu:objetivos")],
-        [("Horarios de avisos", "sys:horarios")],
-        [("Sueldo", "sys:sueldo")],
     ]
     render("¿Qué quieres hacer?", filas)
 
@@ -1572,6 +1632,7 @@ def saldo_menu():
     filas.append([("Anexar", "saldo:anexar")])
     filas.append([("Total", "saldo:total")])
     filas.append([("Estatus", "saldo:estatus")])
+    filas.append([("Sueldo", "sys:sueldo")])
     filas.append([("Volver", "menu:main")])
     render("¿Qué cuenta quieres ver?", filas)
 
@@ -2575,6 +2636,7 @@ def objetivo_cumplido_confirmar(objetivo_id):
 
 def recordatorios_menu():
     render("¿Qué quieres ver?", [[("Próximos avisos", "rec:proximos"), ("Ajustar aviso", "rec:ajustar")],
+                                 [("Horarios de avisos", "sys:horarios")],
                                  [("Volver", "menu:main")]])
 
 
