@@ -16,6 +16,7 @@ import requests
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.widget import Widget
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.label import Label
 from kivy.uix.button import Button
@@ -43,6 +44,7 @@ LabelBase.register(name="Poppins",
                     fn_bold=os.path.join(_FONT_DIR, "Poppins-Bold.ttf"))
 LabelBase.register(name="PoppinsSemiBold", fn_regular=os.path.join(_FONT_DIR, "Poppins-SemiBold.ttf"))
 LabelBase.register(name="PoppinsMedium", fn_regular=os.path.join(_FONT_DIR, "Poppins-Medium.ttf"))
+LabelBase.register(name="DSEG7", fn_regular=os.path.join(_FONT_DIR, "DSEG7Classic-Bold.ttf"))
 
 # ==================== SONIDOS ====================
 _SOUND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "sounds")
@@ -222,6 +224,20 @@ def listar_cuentas_simples():
     return [{"id": f[0], "nombre": f[1]} for f in filas]
 
 
+def pedir_cuenta(texto_pregunta, prefijo, excluir_id=None):
+    """Muestra la lista de cuentas para elegir (con el prefijo de callback dado).
+    Si no hay ninguna cuenta todavía, avisa en vez de mostrar una pantalla vacía."""
+    cuentas = listar_cuentas_simples()
+    if excluir_id is not None:
+        cuentas = [c for c in cuentas if c["id"] != excluir_id]
+    if not cuentas:
+        render("No tienes ninguna cuenta creada todavía. Ve a Menú > Saldo > Anexar para crear una primero.",
+               [[("Menú", "menu:main")]])
+        return
+    filas = [[(c["nombre"], f"{prefijo}{c['id']}")] for c in cuentas]
+    render(texto_pregunta, filas)
+
+
 def calcular_costo_semanal_usdt(con):
     total = 0.0
     for monto, moneda, frecuencia in con.execute(
@@ -235,7 +251,11 @@ def estatus_calcular(con):
     saldo_total_usdt = sum(
         convertir_a_usdt(s, m) for _, s, m in con.execute("SELECT nombre, saldo, moneda FROM cuentas").fetchall())
     costo_semanal = calcular_costo_semanal_usdt(con)
-    semanas = (saldo_total_usdt / costo_semanal) if costo_semanal > 0 else float("inf")
+    if costo_semanal <= 0:
+        return {"saldo_total_usdt": round(saldo_total_usdt, 2), "costo_semanal_usdt": 0,
+                "semanas_cobertura": None, "estado": "Sin gastos fijos",
+                "faltante_saludable": 0, "faltante_optimo": 0}
+    semanas = saldo_total_usdt / costo_semanal
     if semanas < 1:
         estado = "Crítico"
     elif semanas < 4:
@@ -245,7 +265,7 @@ def estatus_calcular(con):
     faltante_saludable = max(round(costo_semanal - saldo_total_usdt, 2), 0) if semanas < 1 else 0
     faltante_optimo = max(round(costo_semanal * 4 - saldo_total_usdt, 2), 0) if semanas < 4 else 0
     return {"saldo_total_usdt": round(saldo_total_usdt, 2), "costo_semanal_usdt": round(costo_semanal, 2),
-            "semanas_cobertura": None if semanas == float("inf") else round(semanas, 1),
+            "semanas_cobertura": round(semanas, 1),
             "estado": estado, "faltante_saludable": faltante_saludable, "faltante_optimo": faltante_optimo}
 
 
@@ -601,8 +621,7 @@ def sueldo_config_texto(texto):
             return
         d["dia_mes"] = dia
         ESTADO["paso"] = "cuenta"
-        filas = [[(c["nombre"], f"sueldo:cuenta:{c['id']}")] for c in listar_cuentas_simples()]
-        render("¿A qué cuenta entra?", filas)
+        pedir_cuenta("¿A qué cuenta entra?", "sueldo:cuenta:")
         return
 
 
@@ -618,15 +637,13 @@ def sueldo_moneda_callback(moneda):
         render("¿Qué día del mes? (1-31)", pedir_texto=True, teclado_numero=True)
     else:
         ESTADO["paso"] = "cuenta"
-        filas = [[(c["nombre"], f"sueldo:cuenta:{c['id']}")] for c in listar_cuentas_simples()]
-        render("¿A qué cuenta entra?", filas)
+        pedir_cuenta("¿A qué cuenta entra?", "sueldo:cuenta:")
 
 
 def sueldo_diasemana_callback(dia_semana):
     ESTADO["datos"]["dia_semana"] = dia_semana
     ESTADO["paso"] = "cuenta"
-    filas = [[(c["nombre"], f"sueldo:cuenta:{c['id']}")] for c in listar_cuentas_simples()]
-    render("¿A qué cuenta entra?", filas)
+    pedir_cuenta("¿A qué cuenta entra?", "sueldo:cuenta:")
 
 
 def sueldo_cuenta_callback(cuenta_id):
@@ -751,6 +768,107 @@ def terminar_flujo():
     ESTADO["datos"] = {}
 
 
+COLOR_LIQUIDO_VERDE = (0.62, 0.86, 0.20, 1)
+COLOR_TUBO_FONDO = (0.93, 0.97, 0.85, 1)
+COLOR_CASCO_NEGRO = (0.08, 0.08, 0.09, 1)
+COLOR_PANTALLA_NEGRA = (0.03, 0.03, 0.04, 1)
+COLOR_DIGITO_BLANCO = (0.95, 0.97, 0.95, 1)
+COLOR_DIGITO_VERDE_TENUE = (0.55, 0.80, 0.45, 1)
+
+
+class MedidorLiquidez(BoxLayout):
+    """Tubo vertical tipo 'nivel de albañil' (carcasa negra, líquido verde que
+    sube o baja según tu liquidez) + una 'pantallita digital' al lado con el
+    saldo actual de la cuenta del sueldo, para saber cuánto te queda por gastar."""
+
+    def __init__(self, **kwargs):
+        super().__init__(orientation="horizontal", size_hint=(1, None), height=dp(96), spacing=dp(14), **kwargs)
+
+        self.tubo = Widget(size_hint=(None, 1), width=dp(34))
+        with self.tubo.canvas:
+            self._casco = Color(*COLOR_CASCO_NEGRO)
+            self._casco_rect = RoundedRectangle(radius=[dp(10)])
+            self._fondo = Color(*COLOR_TUBO_FONDO)
+            self._fondo_rect = RoundedRectangle(radius=[dp(8)])
+            self._liquido = Color(*COLOR_LIQUIDO_VERDE)
+            self._liquido_rect = Rectangle()
+            self._marca = Color(*COLOR_CASCO_NEGRO)
+            self._marcas_rect = [Rectangle() for _ in range(3)]
+        self.tubo.bind(pos=self._redibujar, size=self._redibujar)
+        self.add_widget(self.tubo)
+
+        self.pantalla = BoxLayout(orientation="vertical", size_hint=(1, 1), padding=(dp(12), dp(10)))
+        with self.pantalla.canvas.before:
+            Color(*COLOR_PANTALLA_NEGRA)
+            self._pantalla_rect = RoundedRectangle(radius=[dp(10)])
+        self.pantalla.bind(pos=self._redibujar_pantalla, size=self._redibujar_pantalla)
+
+        self.etiqueta_titulo = Label(text="Sueldo", font_name="Poppins", font_size=dp(11),
+                                     color=COLOR_DIGITO_VERDE_TENUE, size_hint=(1, None), height=dp(16),
+                                     halign="left", valign="top")
+        self.etiqueta_titulo.bind(size=lambda inst, s: setattr(inst, "text_size", s))
+
+        self.etiqueta_numero = Label(text="--", font_name="DSEG7", font_size=dp(26),
+                                     color=COLOR_DIGITO_BLANCO, size_hint=(1, 1),
+                                     halign="left", valign="middle")
+        self.etiqueta_numero.bind(size=lambda inst, s: setattr(inst, "text_size", s))
+
+        self.pantalla.add_widget(self.etiqueta_titulo)
+        self.pantalla.add_widget(self.etiqueta_numero)
+        self.add_widget(self.pantalla)
+
+        self._fraccion = 0.0
+
+    def _redibujar(self, *_):
+        x, y = self.tubo.pos
+        w, h = self.tubo.size
+        borde = dp(3)
+        self._casco_rect.pos = (x, y)
+        self._casco_rect.size = (w, h)
+        self._fondo_rect.pos = (x + borde, y + borde)
+        self._fondo_rect.size = (w - borde * 2, h - borde * 2)
+        alto_liquido = max((h - borde * 2) * self._fraccion, 0)
+        self._liquido_rect.pos = (x + borde, y + borde)
+        self._liquido_rect.size = (w - borde * 2, alto_liquido)
+        for i, marca in enumerate(self._marcas_rect):
+            frac_marca = (i + 1) / (len(self._marcas_rect) + 1)
+            marca.pos = (x + borde, y + borde + (h - borde * 2) * frac_marca)
+            marca.size = (w - borde * 2, dp(1.4))
+
+    def _redibujar_pantalla(self, *_):
+        self._pantalla_rect.pos = self.pantalla.pos
+        self._pantalla_rect.size = self.pantalla.size
+
+    def actualizar(self, fraccion, titulo_pantalla, texto_numero):
+        self._fraccion = max(0.0, min(1.0, fraccion))
+        self.etiqueta_titulo.text = titulo_pantalla
+        self.etiqueta_numero.text = texto_numero
+        self._redibujar()
+        self._redibujar_pantalla()
+
+
+def actualizar_medidor():
+    if PANTALLA is None or not hasattr(PANTALLA, "medidor"):
+        return
+    con = conectar()
+    r = estatus_calcular(con)
+    fila_sueldo = con.execute("SELECT activo, cuenta_id FROM config_sueldo WHERE id=1").fetchone()
+    activo, cuenta_id = fila_sueldo if fila_sueldo else (0, None)
+    titulo = "Sueldo"
+    if activo and cuenta_id:
+        cuenta = con.execute("SELECT nombre, saldo, moneda FROM cuentas WHERE id=?", (cuenta_id,)).fetchone()
+        if cuenta:
+            titulo = cuenta[0]
+            texto_numero = f"{round(cuenta[1], 2)} {cuenta[2]}"
+        else:
+            texto_numero = "cuenta eliminada"
+    else:
+        texto_numero = "sin configurar"
+    con.close()
+    fraccion = 0.0 if r["estado"] == "Sin gastos fijos" else min(r["semanas_cobertura"] / 4, 1.0)
+    PANTALLA.medidor.actualizar(fraccion, titulo, texto_numero)
+
+
 class MainScreen(Screen):
     """Una sola pantalla cuyo contenido se reconstruye en cada paso,
     igual que el bot reescribía el mensaje con editar()."""
@@ -767,7 +885,7 @@ class MainScreen(Screen):
         self.titulo.bind(size=lambda inst, s: setattr(inst, "text_size", s))
         raiz.add_widget(self.titulo)
 
-        tarjeta = BoxLayout(orientation="vertical", padding=dp(16), size_hint=(1, 1))
+        tarjeta = BoxLayout(orientation="vertical", padding=dp(16), spacing=dp(12), size_hint=(1, 1))
         with tarjeta.canvas.before:
             Color(*COLOR_PANEL)
             self._tarjeta_rect = RoundedRectangle(pos=tarjeta.pos, size=tarjeta.size, radius=[dp(20)])
@@ -778,6 +896,10 @@ class MainScreen(Screen):
         self.contenido.bind(minimum_height=self.contenido.setter("height"))
         scroll.add_widget(self.contenido)
         tarjeta.add_widget(scroll)
+
+        self.medidor = MedidorLiquidez()
+        tarjeta.add_widget(self.medidor)
+
         raiz.add_widget(tarjeta)
 
         self.add_widget(raiz)
@@ -888,6 +1010,8 @@ def render(texto, filas_botones=None, pedir_texto=False, teclado_numero=False):
             for etiqueta, cb in fila:
                 row.add_widget(_boton(etiqueta, lambda inst, cb=cb: manejar_callback(cb)))
             cont.add_widget(row)
+
+    actualizar_medidor()
 
 
 # ==================== DESPACHO: CALLBACKS (botones) ====================
@@ -1135,6 +1259,9 @@ def manejar_callback(data):
     if data.startswith("pagado:diferente:"):
         pagado_diferente_iniciar(int(partes[2]))
         return
+    if data.startswith("pagado:cuenta:"):
+        pagado_cuenta_callback(int(partes[2]))
+        return
 
     if data in ("menu:recordatorios", "rec:menu"):
         recordatorios_menu()
@@ -1309,8 +1436,7 @@ def registrar_callback(data):
     if partes[1] == "moneda":
         d["moneda"] = partes[2]
         ESTADO["paso"] = "cuenta"
-        filas = [[(c["nombre"], f"reg:cuenta:{c['id']}")] for c in listar_cuentas_simples()]
-        render("¿De/a qué cuenta?", filas)
+        pedir_cuenta("¿De/a qué cuenta?", "reg:cuenta:")
         return
     if partes[1] == "cuenta":
         d["cuenta_id"] = int(partes[2])
@@ -1332,6 +1458,10 @@ def registrar_callback(data):
                 d["saldo_disponible_principal"] = saldo_usdt
                 faltante = round(monto_usdt - saldo_usdt, 2)
                 otras = [c for c in listar_cuentas_simples() if c["id"] != d["cuenta_id"]]
+                if not otras:
+                    render(f"{cuenta[0]} no alcanza -- faltan ~{faltante} USDT, y no tienes otra cuenta de "
+                           f"donde completarlo. El gasto no se registró.", [[("Menú", "menu:main")]])
+                    return
                 filas = [[(c["nombre"], f"reg:cuenta2:{c['id']}")] for c in otras]
                 render(f"{cuenta[0]} no alcanza -- faltan ~{faltante} USDT. ¿De qué cuenta sacas el resto?", filas)
                 return
@@ -1473,7 +1603,10 @@ def estatus_mostrar():
     costo_bs = round(r["costo_semanal_usdt"] * tasas["paralelo"], 2)
     lineas = ["ESTATUS DE TU PLAN", "", f"Estado: {r['estado']}", f"Saldo total: {r['saldo_total_usdt']} USDT",
               f"Tu semana cuesta: {r['costo_semanal_usdt']} USDT (~{costo_bs} Bs)"]
-    if r["estado"] == "Crítico":
+    if r["estado"] == "Sin gastos fijos":
+        lineas.append("\nTodavía no tienes gastos fijos configurados -- sin eso no puedo calcular "
+                      "si tu saldo te alcanza o no. Ve a 'Gastos fijos' para agregarlos.")
+    elif r["estado"] == "Crítico":
         lineas.append("\nADVERTENCIA: no tienes respaldo para cubrir tu semana.")
         lineas.append(f"Para llegar a Saludable, te faltan: {r['faltante_saludable']} USDT")
     elif r["estado"] == "Saludable":
@@ -2037,8 +2170,7 @@ def pago_recurrente_categoria_callback(categoria):
     d = ESTADO["datos"]
     d["categoria"] = categoria
     frecuencia = "cada semana" if d["frecuencia"] == "semanal" else "cada día"
-    filas = [[(c["nombre"], f"pago:cuentarec:{c['id']}")] for c in listar_cuentas_simples()]
-    render(f"¿De qué cuenta sale {frecuencia}?", filas)
+    pedir_cuenta(f"¿De qué cuenta sale {frecuencia}?", "pago:cuentarec:")
 
 
 def pago_recurrente_cuenta_callback(cuenta_id):
@@ -2110,8 +2242,7 @@ def pago_editar_campo_elegido(pago_id, campo):
         filas = [[(c, f"pago:editarvalor:{pago_id}:categoria:{c}")] for c in CATEGORIAS_GASTO]
         render("¿Nueva categoría?", filas)
     elif campo == "cuenta":
-        filas = [[(c["nombre"], f"pago:editarvalor:{pago_id}:cuenta:{c['id']}")] for c in listar_cuentas_simples()]
-        render("¿Nueva cuenta?", filas)
+        pedir_cuenta("¿Nueva cuenta?", f"pago:editarvalor:{pago_id}:cuenta:")
     elif campo == "diasemana":
         filas = [[(dd, f"pago:editarvalor:{pago_id}:diasemana:{i}")] for i, dd in enumerate(DIAS_SEMANA)]
         render("¿Nuevo día?", filas)
@@ -2261,8 +2392,7 @@ def porcobrar_moneda_callback(moneda):
     ESTADO["datos"]["moneda"] = moneda
     if ESTADO["flujo"] == "prestamo":
         ESTADO["paso"] = "cuenta"
-        filas = [[(c["nombre"], f"prestamo:cuenta:{c['id']}")] for c in listar_cuentas_simples()]
-        render("¿De qué cuenta sale?", filas)
+        pedir_cuenta("¿De qué cuenta sale?", "prestamo:cuenta:")
     else:
         ESTADO["paso"] = "descripcion"
         render("¿De quién / por qué?", pedir_texto=True)
@@ -2293,7 +2423,7 @@ def pagado_elegir(item_id):
            [[("Completo", f"pagado:completo:{item_id}"), ("Monto diferente", f"pagado:diferente:{item_id}")]])
 
 
-def pagado_aplicar(con, item_id, monto_pagado_ahora):
+def pagado_aplicar(con, item_id, monto_pagado_ahora, cuenta_id):
     fila = con.execute("SELECT monto_pendiente, moneda FROM por_cobrar WHERE id=?", (item_id,)).fetchone()
     nuevo_pendiente = round(fila[0] - monto_pagado_ahora, 2)
     if nuevo_pendiente <= 0:
@@ -2301,23 +2431,24 @@ def pagado_aplicar(con, item_id, monto_pagado_ahora):
         nuevo_pendiente = 0
     else:
         con.execute("UPDATE por_cobrar SET monto_pendiente=? WHERE id=?", (nuevo_pendiente, item_id))
-    bdv = con.execute("SELECT id, saldo, moneda FROM cuentas WHERE nombre='BDV'").fetchone()
-    if bdv:
-        monto_usdt = convertir_a_usdt(monto_pagado_ahora, fila[1])
-        delta_en_moneda = monto_usdt * obtener_tasas()["paralelo"] if bdv[2] == "VES" else monto_usdt
-        con.execute("UPDATE cuentas SET saldo=saldo+? WHERE id=?", (delta_en_moneda, bdv[0]))
+    cuenta = con.execute("SELECT saldo, moneda FROM cuentas WHERE id=?", (cuenta_id,)).fetchone()
+    monto_usdt = convertir_a_usdt(monto_pagado_ahora, fila[1])
+    delta_en_moneda = monto_usdt * obtener_tasas()["paralelo"] if cuenta[1] == "VES" else monto_usdt
+    con.execute("UPDATE cuentas SET saldo=saldo+? WHERE id=?", (delta_en_moneda, cuenta_id))
     con.commit()
     return nuevo_pendiente
+
+
+def _pagado_pedir_cuenta():
+    pedir_cuenta("¿A qué cuenta entra este pago?", "pagado:cuenta:")
 
 
 def pagado_completo_callback(item_id):
     con = conectar()
     monto_pendiente_antes = con.execute("SELECT monto_pendiente FROM por_cobrar WHERE id=?", (item_id,)).fetchone()[0]
-    pagado_aplicar(con, item_id, monto_pendiente_antes)
     con.close()
-    terminar_flujo()
-    sonido("exito")
-    render(f"Cobrado completo: {monto_pendiente_antes}. Se sumó a BDV.", [[("Menú", "menu:main")]])
+    ESTADO["datos"] = {"item_id": item_id, "monto": monto_pendiente_antes}
+    _pagado_pedir_cuenta()
 
 
 def pagado_diferente_iniciar(item_id):
@@ -2334,16 +2465,23 @@ def pagado_texto(texto):
     except ValueError:
         render("Escribe solo el número.", pedir_texto=True, teclado_numero=True)
         return
+    ESTADO["datos"]["monto"] = monto
+    _pagado_pedir_cuenta()
+
+
+def pagado_cuenta_callback(cuenta_id):
+    d = ESTADO["datos"]
     con = conectar()
-    nuevo_pendiente = pagado_aplicar(con, ESTADO["datos"]["item_id"], monto)
+    nuevo_pendiente = pagado_aplicar(con, d["item_id"], d["monto"], cuenta_id)
+    cuenta_nombre = con.execute("SELECT nombre FROM cuentas WHERE id=?", (cuenta_id,)).fetchone()[0]
     con.close()
     terminar_flujo()
+    sonido("exito")
     if nuevo_pendiente > 0:
-        sonido("exito")
-        render(f"Abono registrado: {monto}. Queda pendiente: {nuevo_pendiente}. Se sumó a BDV.", [[("Menú", "menu:main")]])
+        render(f"Abono registrado: {d['monto']}. Queda pendiente: {nuevo_pendiente}. Se sumó a {cuenta_nombre}.",
+               [[("Menú", "menu:main")]])
     else:
-        sonido("exito")
-        render(f"Abono registrado: {monto}. Quedó saldado. Se sumó a BDV.", [[("Menú", "menu:main")]])
+        render(f"Cobrado: {d['monto']}. Quedó saldado. Se sumó a {cuenta_nombre}.", [[("Menú", "menu:main")]])
 
 
 # ==================== MÓDULO: OBJETIVOS ====================
