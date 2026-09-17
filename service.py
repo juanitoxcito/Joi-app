@@ -58,7 +58,24 @@ def calcular_costo_semanal_usdt(con):
     for monto, moneda, frecuencia in con.execute(
             "SELECT monto, moneda, frecuencia FROM pagos_mensuales WHERE activo=1").fetchall():
         usdt = convertir_a_usdt(monto, moneda)
-        total += usdt * 7 if frecuencia == "diario" else usdt / 4.33
+        if frecuencia == "diario":
+            total += usdt * 7
+        elif frecuencia == "semanal":
+            total += usdt
+        else:
+            total += usdt / 4.33
+    fila_sueldo = con.execute(
+        "SELECT activo, frecuencia, monto, moneda, cuenta_origen_id FROM config_sueldo WHERE id=1").fetchone()
+    if fila_sueldo:
+        s_activo, s_frecuencia, s_monto, s_moneda, s_cuenta_origen_id = fila_sueldo
+        if s_activo and s_cuenta_origen_id and s_monto:
+            s_usdt = convertir_a_usdt(s_monto, s_moneda)
+            if s_frecuencia == "diario":
+                total += s_usdt * 7
+            elif s_frecuencia == "semanal":
+                total += s_usdt
+            elif s_frecuencia == "mensual":
+                total += s_usdt / 4.33
     return total
 
 
@@ -66,7 +83,9 @@ def estatus_calcular(con):
     saldo_total_usdt = sum(
         convertir_a_usdt(s, m) for _, s, m in con.execute("SELECT nombre, saldo, moneda FROM cuentas").fetchall())
     costo_semanal = calcular_costo_semanal_usdt(con)
-    semanas = (saldo_total_usdt / costo_semanal) if costo_semanal > 0 else float("inf")
+    if costo_semanal <= 0:
+        return {"saldo_total_usdt": round(saldo_total_usdt, 2), "estado": "Sin gastos fijos"}
+    semanas = saldo_total_usdt / costo_semanal
     if semanas < 1:
         estado = "Crítico"
     elif semanas < 4:
