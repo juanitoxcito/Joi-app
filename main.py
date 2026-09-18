@@ -966,6 +966,7 @@ class MainScreen(Screen):
         self.add_widget(raiz)
         render(saludo())
         pantalla_inicio()
+        programar_todas_las_alarmas(mostrar_error_en_pantalla=True)
 
     def _actualizar_bg(self, *_):
         self._bg.pos = self.pos
@@ -2753,7 +2754,6 @@ def resumen_mostrar(tipo, periodo):
 class JoiApp(App):
     def build(self):
         iniciar_db()
-        programar_todas_las_alarmas()
         sm = ScreenManager()
         global PANTALLA
         PANTALLA = MainScreen(name="main")
