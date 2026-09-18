@@ -7,7 +7,6 @@ del bot ahora dibujara directo en la app en vez de mandar un mensaje.
 Base de datos en blanco -- Juan carga sus cuentas/deudas/gastos desde cero.
 """
 import sqlite3
-import time
 from math import ceil
 from datetime import datetime, timedelta, timezone
 
@@ -90,9 +89,9 @@ def fecha_larga_es(dt):
 
 
 def saludo():
-    ahora = datetime.now(UTC_MENOS_4)
-    momento = "días" if ahora.hour < 12 else ("tardes" if ahora.hour < 19 else "noches")
-    return f"¡Buenos {momento} Juan! Son las {ahora.strftime('%I:%M %p')} y estamos a {fecha_larga_es(ahora)}."
+    momento_actual = ahora()
+    momento = "días" if momento_actual.hour < 12 else ("tardes" if momento_actual.hour < 19 else "noches")
+    return f"¡Buenos {momento} Juan! Son las {momento_actual.strftime('%I:%M %p')} y estamos a {fecha_larga_es(momento_actual)}."
 
 
 # ==================== BASE DE DATOS ====================
@@ -146,6 +145,8 @@ def iniciar_db():
         con.execute("ALTER TABLE config_estrategia ADD COLUMN hora_mediodia TEXT")
     if "hora_noche" not in columnas_config:
         con.execute("ALTER TABLE config_estrategia ADD COLUMN hora_noche TEXT")
+    if "ultima_tasa_paralelo" not in columnas_config:
+        con.execute("ALTER TABLE config_estrategia ADD COLUMN ultima_tasa_paralelo REAL")
     con.execute("""CREATE TABLE IF NOT EXISTS config_sueldo (
         id INTEGER PRIMARY KEY CHECK (id=1), activo INTEGER NOT NULL DEFAULT 0,
         frecuencia TEXT, monto REAL, moneda TEXT, cuenta_id INTEGER,
@@ -172,19 +173,63 @@ def dias_antes_de(con, tipo, item_id):
 
 _cache_tasas = {"valor": None, "ts": 0}
 
+_offset_tiempo = timedelta(0)
+
+
+def calibrar_hora():
+    """Si hay internet, ajusta la hora de la app a la hora real de un servidor
+    (usando el encabezado Date de una petición web), sin depender de un
+    servicio de hora específico. Sin internet, se queda con el último ajuste
+    conocido (o ninguno, si nunca se ha calibrado)."""
+    global _offset_tiempo
+    try:
+        from email.utils import parsedate_to_datetime
+        resp = requests.head("https://www.google.com", timeout=4)
+        fecha_servidor = parsedate_to_datetime(resp.headers["Date"])
+        if fecha_servidor.tzinfo is None:
+            fecha_servidor = fecha_servidor.replace(tzinfo=timezone.utc)
+        ahora_dispositivo = datetime.now(timezone.utc)
+        _offset_tiempo = fecha_servidor - ahora_dispositivo
+    except Exception:
+        pass
+
+
+def ahora():
+    """Igual que datetime.now(UTC_MENOS_4), pero calibrado con la hora real de
+    internet cuando fue posible -- corrige si el reloj del teléfono está mal."""
+    return datetime.now(UTC_MENOS_4) + _offset_tiempo
+
 
 def obtener_tasas():
-    ahora = time.time()
-    if _cache_tasas["valor"] and ahora - _cache_tasas["ts"] < 3600:
-        return _cache_tasas["valor"]
+    """Siempre intenta traer la tasa fresca de internet (la calibra). Si no hay
+    internet, usa la última tasa conocida guardada de forma permanente en la
+    base de datos, en vez de expirar a los 60 minutos o caer en un valor de 1."""
     try:
         paralelo = requests.get("https://ve.dolarapi.com/v1/dolares/paralelo", timeout=4).json()
         tasas = {"paralelo": paralelo["promedio"]}
         _cache_tasas["valor"] = tasas
-        _cache_tasas["ts"] = ahora
+        try:
+            con = conectar()
+            con.execute("UPDATE config_estrategia SET ultima_tasa_paralelo=? WHERE id=1", (tasas["paralelo"],))
+            con.commit()
+            con.close()
+        except Exception:
+            pass
         return tasas
     except Exception:
-        return _cache_tasas["valor"] or {"paralelo": 1}
+        if _cache_tasas["valor"]:
+            return _cache_tasas["valor"]
+        try:
+            con = conectar()
+            fila = con.execute("SELECT ultima_tasa_paralelo FROM config_estrategia WHERE id=1").fetchone()
+            con.close()
+            if fila and fila[0]:
+                tasas = {"paralelo": fila[0]}
+                _cache_tasas["valor"] = tasas
+                return tasas
+        except Exception:
+            pass
+        return {"paralelo": 1}
 
 
 def convertir_a_usdt(monto, moneda):
@@ -333,7 +378,7 @@ def aplicar_estrategia_ingreso(con, monto_usdt):
         nuevo_pagado = min(deuda_pagado + monto_deuda_en_su_moneda, deuda_total)
         con.execute("UPDATE deudas SET monto_pagado=? WHERE id=?", (nuevo_pagado, deuda_id))
         con.execute("INSERT INTO deuda_pagos (deuda_id, monto, fecha) VALUES (?, ?, ?)",
-                    (deuda_id, monto_deuda_en_su_moneda, datetime.now(UTC_MENOS_4).isoformat()))
+                    (deuda_id, monto_deuda_en_su_moneda, ahora().isoformat()))
         if nuevo_pagado >= deuda_total:
             con.execute("UPDATE deudas SET estado='pagada' WHERE id=?", (deuda_id,))
             lineas.append(f"Deuda '{deuda_nombre}': +{monto_deuda_en_su_moneda} {deuda_moneda} -- ¡saldada!")
@@ -494,7 +539,7 @@ def sueldo_pendiente_hoy(con):
     if not fila or not fila[0]:
         return False
     _, frecuencia, dia_semana, dia_mes, ultima_confirmacion = fila
-    hoy = datetime.now(UTC_MENOS_4)
+    hoy = ahora()
     if ultima_confirmacion == hoy.strftime("%Y-%m-%d"):
         return False
     if frecuencia == "diario":
@@ -517,7 +562,7 @@ def sueldo_confirmar_prompt():
 
 def sueldo_confirmar_callback(respuesta):
     con = conectar()
-    hoy_str = datetime.now(UTC_MENOS_4).strftime("%Y-%m-%d")
+    hoy_str = ahora().strftime("%Y-%m-%d")
     if respuesta == "no":
         con.execute("UPDATE config_sueldo SET ultima_confirmacion=? WHERE id=1", (hoy_str,))
         con.commit()
@@ -558,7 +603,7 @@ def sueldo_editar_monto_dia_texto(texto):
 def sueldo_aplicar(cuenta_origen_id):
     d = ESTADO["datos"]
     con = conectar()
-    hoy_str = datetime.now(UTC_MENOS_4).strftime("%Y-%m-%d")
+    hoy_str = ahora().strftime("%Y-%m-%d")
     cuenta_destino = con.execute("SELECT nombre, saldo, moneda FROM cuentas WHERE id=?",
                                  (d["cuenta_destino_id"],)).fetchone()
     if not cuenta_destino:
@@ -567,13 +612,13 @@ def sueldo_aplicar(cuenta_origen_id):
                [[("Menú", "menu:main")]])
         return
     monto_usdt = convertir_a_usdt(d["monto"], d["moneda"])
-    ahora = datetime.now(UTC_MENOS_4).isoformat()
+    ahora_iso = ahora().isoformat()
     delta_destino_moneda = monto_usdt * obtener_tasas()["paralelo"] if cuenta_destino[2] == "VES" else monto_usdt
     nuevo_saldo_destino = cuenta_destino[1] + delta_destino_moneda
     con.execute("UPDATE cuentas SET saldo=? WHERE id=?", (nuevo_saldo_destino, d["cuenta_destino_id"]))
     con.execute("INSERT INTO movimientos (fecha, tipo, monto, moneda, monto_usdt, categoria, cuenta_id) "
                 "VALUES (?,?,?,?,?,?,?)",
-                (ahora, "ingreso", d["monto"], d["moneda"], monto_usdt, "Ingreso", d["cuenta_destino_id"]))
+                (ahora_iso, "ingreso", d["monto"], d["moneda"], monto_usdt, "Ingreso", d["cuenta_destino_id"]))
     texto_origen = ""
     if cuenta_origen_id:
         cuenta_origen = con.execute("SELECT nombre, saldo, moneda FROM cuentas WHERE id=?",
@@ -583,7 +628,7 @@ def sueldo_aplicar(cuenta_origen_id):
         con.execute("UPDATE cuentas SET saldo=? WHERE id=?", (nuevo_saldo_origen, cuenta_origen_id))
         con.execute("INSERT INTO movimientos (fecha, tipo, monto, moneda, monto_usdt, categoria, cuenta_id) "
                     "VALUES (?,'gasto',?,?,?,?,?)",
-                    (ahora, round(delta_origen_moneda, 2), cuenta_origen[2], monto_usdt, "Transferencia",
+                    (ahora_iso, round(delta_origen_moneda, 2), cuenta_origen[2], monto_usdt, "Transferencia",
                      cuenta_origen_id))
         texto_origen = f" (salió de {cuenta_origen[0]}, nuevo saldo {round(nuevo_saldo_origen, 2)} {cuenta_origen[2]})"
     lineas_estrategia = aplicar_estrategia_ingreso(con, monto_usdt)
@@ -964,6 +1009,7 @@ class MainScreen(Screen):
         raiz.add_widget(tarjeta)
 
         self.add_widget(raiz)
+        calibrar_hora()
         render(saludo())
         pantalla_inicio()
         programar_todas_las_alarmas(mostrar_error_en_pantalla=True)
@@ -1554,7 +1600,7 @@ def registrar_texto(texto):
 def finalizar_registro(datos):
     con = conectar()
     monto_usdt = convertir_a_usdt(datos["monto"], datos["moneda"])
-    ahora = datetime.now(UTC_MENOS_4).isoformat()
+    ahora_iso = ahora().isoformat()
     cuenta = con.execute("SELECT nombre, saldo, moneda FROM cuentas WHERE id=?", (datos["cuenta_id"],)).fetchone()
     delta = monto_usdt if datos["tipo"] == "ingreso" else -monto_usdt
     delta_en_moneda_cuenta = delta * obtener_tasas()["paralelo"] if cuenta[2] == "VES" else delta
@@ -1562,7 +1608,7 @@ def finalizar_registro(datos):
     con.execute("UPDATE cuentas SET saldo=? WHERE id=?", (nuevo_saldo, datos["cuenta_id"]))
     con.execute("INSERT INTO movimientos (fecha, tipo, monto, moneda, monto_usdt, categoria, cuenta_id) "
                 "VALUES (?,?,?,?,?,?,?)",
-                (ahora, datos["tipo"], datos["monto"], datos["moneda"], monto_usdt, datos["categoria"], datos["cuenta_id"]))
+                (ahora_iso, datos["tipo"], datos["monto"], datos["moneda"], monto_usdt, datos["categoria"], datos["cuenta_id"]))
     lineas_estrategia = []
     if datos["tipo"] == "ingreso" and datos["categoria"] != "Retorno de saldo":
         lineas_estrategia = aplicar_estrategia_ingreso(con, monto_usdt)
@@ -1589,7 +1635,7 @@ def finalizar_registro(datos):
 
 def finalizar_registro_dividido(datos):
     con = conectar()
-    ahora = datetime.now(UTC_MENOS_4).isoformat()
+    ahora_iso = ahora().isoformat()
     cuenta1 = con.execute("SELECT nombre, saldo, moneda FROM cuentas WHERE id=?", (datos["cuenta_id"],)).fetchone()
     cuenta2 = con.execute("SELECT nombre, saldo, moneda FROM cuentas WHERE id=?", (datos["cuenta_secundaria_id"],)).fetchone()
     monto_usdt_total = datos["monto_usdt_total"]
@@ -1598,13 +1644,13 @@ def finalizar_registro_dividido(datos):
     con.execute("UPDATE cuentas SET saldo=0 WHERE id=?", (datos["cuenta_id"],))
     con.execute("INSERT INTO movimientos (fecha, tipo, monto, moneda, monto_usdt, categoria, cuenta_id) "
                 "VALUES (?,'gasto',?,?,?,?,?)",
-                (ahora, cuenta1[1], cuenta1[2], round(saldo1_usdt, 2), datos["categoria"], datos["cuenta_id"]))
+                (ahora_iso, cuenta1[1], cuenta1[2], round(saldo1_usdt, 2), datos["categoria"], datos["cuenta_id"]))
     delta2_moneda = resto_usdt * obtener_tasas()["paralelo"] if cuenta2[2] == "VES" else resto_usdt
     nuevo_saldo2 = cuenta2[1] - delta2_moneda
     con.execute("UPDATE cuentas SET saldo=? WHERE id=?", (nuevo_saldo2, datos["cuenta_secundaria_id"]))
     con.execute("INSERT INTO movimientos (fecha, tipo, monto, moneda, monto_usdt, categoria, cuenta_id) "
                 "VALUES (?,'gasto',?,?,?,?,?)",
-                (ahora, round(delta2_moneda, 2), cuenta2[2], resto_usdt, datos["categoria"], datos["cuenta_secundaria_id"]))
+                (ahora_iso, round(delta2_moneda, 2), cuenta2[2], resto_usdt, datos["categoria"], datos["cuenta_secundaria_id"]))
     con.commit()
     advertencias = []
     if nuevo_saldo2 < 0:
@@ -1710,7 +1756,7 @@ def saldo_editar_texto(texto):
         return
     con = conectar()
     con.execute("UPDATE cuentas SET saldo=?, ultima_confirmacion=? WHERE id=?",
-                (monto, datetime.now(UTC_MENOS_4).isoformat(), ESTADO["datos"]["cuenta_id"]))
+                (monto, ahora().isoformat(), ESTADO["datos"]["cuenta_id"]))
     con.commit()
     con.close()
     terminar_flujo()
@@ -1764,7 +1810,7 @@ def anexar_cuenta_callback(moneda):
     try:
         con.execute("INSERT INTO cuentas (nombre, grupo, saldo, moneda, ultima_confirmacion) "
                     "VALUES (?, 'sin_grupo', ?, ?, ?)",
-                    (d["nombre"], d["saldo"], moneda, datetime.now(UTC_MENOS_4).isoformat()))
+                    (d["nombre"], d["saldo"], moneda, ahora().isoformat()))
         con.commit()
         render(f"Cuenta '{d['nombre']}' agregada.", [[("Menú", "menu:main")]])
         sonido("exito")
@@ -1902,7 +1948,7 @@ def deuda_recomendar_estrategia(con, monto_nueva_deuda_usdt):
     deudas_activas = con.execute("SELECT monto_total, monto_pagado, moneda FROM deudas WHERE estado='activa'").fetchall()
     deuda_pendiente_actual_usdt = sum(convertir_a_usdt(t - p, m) for t, p, m in deudas_activas)
     deuda_total = round(deuda_pendiente_actual_usdt + monto_nueva_deuda_usdt, 2)
-    desde = (datetime.now(UTC_MENOS_4) - timedelta(days=30)).isoformat()
+    desde = (ahora() - timedelta(days=30)).isoformat()
     ingreso_30d = con.execute(
         "SELECT COALESCE(SUM(monto_usdt),0) FROM movimientos WHERE tipo='ingreso' AND categoria='Ingreso' AND fecha>=?",
         (desde,)).fetchone()[0]
@@ -1967,7 +2013,7 @@ def informe_mostrar():
     deudas = con.execute(
         "SELECT id, nombre, monto_total, monto_pagado, moneda, tipo_pago, dia_pago, fecha_limite "
         "FROM deudas WHERE estado='activa'").fetchall()
-    hoy = datetime.now(UTC_MENOS_4).date()
+    hoy = ahora().date()
     if not deudas:
         con.close()
         render("No tienes deudas activas.", [[("Volver", "deuda:menu")]])
@@ -2029,7 +2075,7 @@ def deuda_tipopago_callback(tipo_pago):
 
 def deuda_guardar(datos, fecha_seleccionada, dia_pago_directo=None):
     con = conectar()
-    mes_actual = datetime.now(UTC_MENOS_4).strftime("%Y-%m")
+    mes_actual = ahora().strftime("%Y-%m")
     fecha_limite = None
     dia_pago = None
     if datos.get("tipo_pago") == "cuotas":
@@ -2065,7 +2111,7 @@ def calcular_resumen_cuotas(con, deuda_id, nombre, monto_total, moneda, dia_pago
     estrategia_usar = "live" if estatus_actual == "Crítico" else estrategia_activa
     tabla = ESTRATEGIAS.get(estrategia_usar, ESTRATEGIAS["medium"])
     pct_deuda = tabla["fase1"][1] if colchon_actual < colchon_meta else tabla["fase2"][0]
-    hoy = datetime.now(UTC_MENOS_4).date()
+    hoy = ahora().date()
     proxima = hoy.replace(day=min(dia_pago, 28)) if hoy.day <= dia_pago else \
         (hoy.replace(day=1) + timedelta(days=32)).replace(day=min(dia_pago, 28))
     dias_restantes = (proxima - hoy).days
@@ -2431,7 +2477,7 @@ def porcobrar_texto(texto):
             con.execute("INSERT INTO por_cobrar (tipo, monto_original, monto_pendiente, moneda, descripcion, "
                         "cuenta_origen_id, estado, fecha) VALUES ('prestamo', ?, ?, ?, ?, ?, 'pendiente', ?)",
                         (d["monto"], d["monto"], d["moneda"], d["descripcion"], d["cuenta_id"],
-                         datetime.now(UTC_MENOS_4).isoformat()))
+                         ahora().isoformat()))
             con.commit()
             con.close()
             terminar_flujo()
@@ -2442,7 +2488,7 @@ def porcobrar_texto(texto):
             con = conectar()
             con.execute("INSERT INTO por_cobrar (tipo, monto_original, monto_pendiente, moneda, descripcion, "
                         "cuenta_origen_id, estado, fecha) VALUES ('cobrar', ?, ?, ?, ?, NULL, 'pendiente', ?)",
-                        (d["monto"], d["monto"], d["moneda"], d["descripcion"], datetime.now(UTC_MENOS_4).isoformat()))
+                        (d["monto"], d["monto"], d["moneda"], d["descripcion"], ahora().isoformat()))
             con.commit()
             con.close()
             terminar_flujo()
@@ -2644,7 +2690,7 @@ def recordatorios_menu():
 def recordatorios_proximos():
     con = conectar()
     lineas = []
-    hoy = datetime.now(UTC_MENOS_4).date()
+    hoy = ahora().date()
     for nombre, limite in con.execute("SELECT nombre, fecha_limite FROM deudas WHERE estado='activa'").fetchall():
         if limite:
             dias = (datetime.strptime(limite, "%Y-%m-%d").date() - hoy).days
@@ -2721,9 +2767,9 @@ def resumen_periodo_menu(tipo):
 def resumen_mostrar(tipo, periodo):
     con = conectar()
     if periodo == "diario":
-        desde = datetime.now(UTC_MENOS_4).strftime("%Y-%m-%d")
+        desde = ahora().strftime("%Y-%m-%d")
     else:
-        desde = (datetime.now(UTC_MENOS_4) - timedelta(days=PERIODO_DIAS[periodo])).isoformat()
+        desde = (ahora() - timedelta(days=PERIODO_DIAS[periodo])).isoformat()
     filas_db = con.execute("SELECT categoria, monto, moneda, monto_usdt FROM movimientos WHERE tipo=? AND fecha >= ?",
                            (tipo, desde)).fetchall()
     con.close()
