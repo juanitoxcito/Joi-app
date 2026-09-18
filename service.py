@@ -9,7 +9,6 @@ Sin imports de Kivy a propósito -- en un servicio de fondo no hay
 pantalla, y cargar Kivy aquí sería lento e innecesario.
 """
 import os
-import time
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -23,23 +22,61 @@ def conectar():
     return sqlite3.connect(DB_PATH)
 
 
-# ==================== TASAS Y CONVERSIÓN (igual que en main.py) ====================
+# ==================== TASAS (persistentes, igual que en main.py) ====================
 
 _cache_tasas = {"valor": None, "ts": 0}
 
 
 def obtener_tasas():
-    ahora = time.time()
-    if _cache_tasas["valor"] and ahora - _cache_tasas["ts"] < 3600:
-        return _cache_tasas["valor"]
     try:
         paralelo = requests.get("https://ve.dolarapi.com/v1/dolares/paralelo", timeout=4).json()
         tasas = {"paralelo": paralelo["promedio"]}
         _cache_tasas["valor"] = tasas
-        _cache_tasas["ts"] = ahora
+        try:
+            con = conectar()
+            con.execute("UPDATE config_estrategia SET ultima_tasa_paralelo=? WHERE id=1", (tasas["paralelo"],))
+            con.commit()
+            con.close()
+        except Exception:
+            pass
         return tasas
     except Exception:
-        return _cache_tasas["valor"] or {"paralelo": 1}
+        if _cache_tasas["valor"]:
+            return _cache_tasas["valor"]
+        try:
+            con = conectar()
+            fila = con.execute("SELECT ultima_tasa_paralelo FROM config_estrategia WHERE id=1").fetchone()
+            con.close()
+            if fila and fila[0]:
+                tasas = {"paralelo": fila[0]}
+                _cache_tasas["valor"] = tasas
+                return tasas
+        except Exception:
+            pass
+        return {"paralelo": 1}
+
+
+# ==================== HORA CALIBRADA (igual que en main.py) ====================
+
+_offset_tiempo = timedelta(0)
+
+
+def calibrar_hora():
+    global _offset_tiempo
+    try:
+        from email.utils import parsedate_to_datetime
+        resp = requests.head("https://www.google.com", timeout=4)
+        fecha_servidor = parsedate_to_datetime(resp.headers["Date"])
+        if fecha_servidor.tzinfo is None:
+            fecha_servidor = fecha_servidor.replace(tzinfo=timezone.utc)
+        ahora_dispositivo = datetime.now(timezone.utc)
+        _offset_tiempo = fecha_servidor - ahora_dispositivo
+    except Exception:
+        pass
+
+
+def ahora():
+    return datetime.now(UTC_MENOS_4) + _offset_tiempo
 
 
 def convertir_a_usdt(monto, moneda):
@@ -96,7 +133,7 @@ def estatus_calcular(con):
 
 
 def calcular_totales_dia(con):
-    hoy = datetime.now(UTC_MENOS_4).strftime("%Y-%m-%d")
+    hoy = ahora().strftime("%Y-%m-%d")
     gastos = con.execute(
         "SELECT categoria, SUM(monto_usdt) FROM movimientos WHERE tipo='gasto' AND fecha>=? GROUP BY categoria",
         (hoy,)).fetchall()
@@ -181,6 +218,7 @@ def reprogramar_para_manana(slot):
 # ==================== PUNTO DE ENTRADA DEL SERVICIO ====================
 
 def main():
+    calibrar_hora()
     slot = os.environ.get("PYTHON_SERVICE_ARGUMENT", "").strip()
     if slot not in ("manana", "mediodia", "noche"):
         print(f"[SERVICIO JOI] Turno desconocido: '{slot}'")
