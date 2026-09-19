@@ -175,6 +175,7 @@ def mostrar_notificacion_servicio(titulo, mensaje):
     NotificationChannel = autoclass("android.app.NotificationChannel")
     NotificationBuilder = autoclass("android.app.Notification$Builder")
     BuildVersion = autoclass("android.os.Build$VERSION")
+    PendingIntent = autoclass("android.app.PendingIntent")
 
     servicio_notif = contexto.getSystemService(Context.NOTIFICATION_SERVICE)
     canal_id = "joi_canal"
@@ -188,6 +189,12 @@ def mostrar_notificacion_servicio(titulo, mensaje):
     builder.setContentText(mensaje)
     builder.setSmallIcon(contexto.getApplicationInfo().icon)
     builder.setAutoCancel(True)
+    intent_abrir = contexto.getPackageManager().getLaunchIntentForPackage(contexto.getPackageName())
+    if intent_abrir:
+        intent_abrir.setFlags(0x10000000)  # FLAG_ACTIVITY_NEW_TASK -- obligatorio al lanzar desde un servicio
+        flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        pendiente = PendingIntent.getActivity(contexto, 0, intent_abrir, flags)
+        builder.setContentIntent(pendiente)
     servicio_notif.notify(2, builder.build())
 
 
