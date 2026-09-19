@@ -418,6 +418,7 @@ def mostrar_notificacion(titulo, mensaje):
     NotificationChannel = autoclass("android.app.NotificationChannel")
     NotificationBuilder = autoclass("android.app.Notification$Builder")
     BuildVersion = autoclass("android.os.Build$VERSION")
+    PendingIntent = autoclass("android.app.PendingIntent")
 
     activity = PythonActivity.mActivity
     servicio = activity.getSystemService(Context.NOTIFICATION_SERVICE)
@@ -432,6 +433,11 @@ def mostrar_notificacion(titulo, mensaje):
     builder.setContentText(mensaje)
     builder.setSmallIcon(activity.getApplicationInfo().icon)
     builder.setAutoCancel(True)
+    intent_abrir = activity.getPackageManager().getLaunchIntentForPackage(activity.getPackageName())
+    if intent_abrir:
+        flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        pendiente = PendingIntent.getActivity(activity, 0, intent_abrir, flags)
+        builder.setContentIntent(pendiente)
     servicio.notify(1, builder.build())
 
 
