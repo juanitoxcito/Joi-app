@@ -7,6 +7,7 @@ del bot ahora dibujara directo en la app en vez de mandar un mensaje.
 Base de datos en blanco -- Juan carga sus cuentas/deudas/gastos desde cero.
 """
 import sqlite3
+import threading
 from math import ceil
 from datetime import datetime, timedelta, timezone
 
@@ -25,6 +26,8 @@ from kivy.core.window import Window
 from kivy.core.text import LabelBase
 from kivy.core.audio import SoundLoader
 from kivy.graphics import Color, Rectangle, RoundedRectangle
+from kivy.core.image import Image as CoreImage
+from kivy.clock import Clock
 
 # ==================== TEMA VISUAL (navy + morado, fuente Poppins) ====================
 COLOR_FONDO = (0.06, 0.07, 0.13, 1)
@@ -102,6 +105,9 @@ def iniciar_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL UNIQUE,
         grupo TEXT NOT NULL, saldo REAL NOT NULL DEFAULT 0,
         moneda TEXT NOT NULL, ultima_confirmacion TEXT)""")
+    columnas_cuentas = {f[1] for f in con.execute("PRAGMA table_info(cuentas)").fetchall()}
+    if "comision_porcentaje" not in columnas_cuentas:
+        con.execute("ALTER TABLE cuentas ADD COLUMN comision_porcentaje REAL NOT NULL DEFAULT 0")
     con.execute("""CREATE TABLE IF NOT EXISTS movimientos (
         id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT NOT NULL, tipo TEXT NOT NULL,
         monto REAL NOT NULL, moneda TEXT NOT NULL, monto_usdt REAL NOT NULL,
@@ -169,29 +175,24 @@ def dias_antes_de(con, tipo, item_id):
     return fila[0] if fila else 3
 
 
-# ==================== TASAS Y CONVERSIÓN ====================
+# ==================== TASAS Y HORA (calibradas con internet en segundo plano) ====================
 
-_cache_tasas = {"valor": None, "ts": 0}
+_cache_tasas = {"valor": None}
 
 _offset_tiempo = timedelta(0)
 
 
-def calibrar_hora():
-    """Si hay internet, ajusta la hora de la app a la hora real de un servidor
-    (usando el encabezado Date de una petición web), sin depender de un
-    servicio de hora específico. Sin internet, se queda con el último ajuste
-    conocido (o ninguno, si nunca se ha calibrado)."""
+def _calibrar_hora_red():
+    """Llamada de red bloqueante -- SOLO se ejecuta en el hilo de segundo plano,
+    nunca directo desde la pantalla, para no congelar la app."""
     global _offset_tiempo
-    try:
-        from email.utils import parsedate_to_datetime
-        resp = requests.head("https://www.google.com", timeout=4)
-        fecha_servidor = parsedate_to_datetime(resp.headers["Date"])
-        if fecha_servidor.tzinfo is None:
-            fecha_servidor = fecha_servidor.replace(tzinfo=timezone.utc)
-        ahora_dispositivo = datetime.now(timezone.utc)
-        _offset_tiempo = fecha_servidor - ahora_dispositivo
-    except Exception:
-        pass
+    from email.utils import parsedate_to_datetime
+    resp = requests.head("https://www.google.com", timeout=4)
+    fecha_servidor = parsedate_to_datetime(resp.headers["Date"])
+    if fecha_servidor.tzinfo is None:
+        fecha_servidor = fecha_servidor.replace(tzinfo=timezone.utc)
+    ahora_dispositivo = datetime.now(timezone.utc)
+    _offset_tiempo = fecha_servidor - ahora_dispositivo
 
 
 def ahora():
@@ -200,36 +201,59 @@ def ahora():
     return datetime.now(UTC_MENOS_4) + _offset_tiempo
 
 
+def _calibrar_tasa_red():
+    """Llamada de red bloqueante -- SOLO se ejecuta en el hilo de segundo plano."""
+    paralelo = requests.get("https://ve.dolarapi.com/v1/dolares/paralelo", timeout=4).json()
+    tasas = {"paralelo": paralelo["promedio"]}
+    _cache_tasas["valor"] = tasas
+    con = conectar()
+    con.execute("UPDATE config_estrategia SET ultima_tasa_paralelo=? WHERE id=1", (tasas["paralelo"],))
+    con.commit()
+    con.close()
+
+
 def obtener_tasas():
-    """Siempre intenta traer la tasa fresca de internet (la calibra). Si no hay
-    internet, usa la última tasa conocida guardada de forma permanente en la
-    base de datos, en vez de expirar a los 60 minutos o caer en un valor de 1."""
+    """Nunca toca la red (para no congelar la pantalla) -- usa la última tasa
+    calibrada en segundo plano, o la que quedó guardada en la base de datos."""
+    if _cache_tasas["valor"]:
+        return _cache_tasas["valor"]
     try:
-        paralelo = requests.get("https://ve.dolarapi.com/v1/dolares/paralelo", timeout=4).json()
-        tasas = {"paralelo": paralelo["promedio"]}
-        _cache_tasas["valor"] = tasas
-        try:
-            con = conectar()
-            con.execute("UPDATE config_estrategia SET ultima_tasa_paralelo=? WHERE id=1", (tasas["paralelo"],))
-            con.commit()
-            con.close()
-        except Exception:
-            pass
-        return tasas
+        con = conectar()
+        fila = con.execute("SELECT ultima_tasa_paralelo FROM config_estrategia WHERE id=1").fetchone()
+        con.close()
+        if fila and fila[0]:
+            tasas = {"paralelo": fila[0]}
+            _cache_tasas["valor"] = tasas
+            return tasas
     except Exception:
-        if _cache_tasas["valor"]:
-            return _cache_tasas["valor"]
-        try:
-            con = conectar()
-            fila = con.execute("SELECT ultima_tasa_paralelo FROM config_estrategia WHERE id=1").fetchone()
-            con.close()
-            if fila and fila[0]:
-                tasas = {"paralelo": fila[0]}
-                _cache_tasas["valor"] = tasas
-                return tasas
-        except Exception:
-            pass
-        return {"paralelo": 1}
+        pass
+    return {"paralelo": 1}
+
+
+def calibrar_en_segundo_plano():
+    """Corre en un hilo aparte, apenas se abre la app: intenta conectar a
+    internet para calibrar hora y tasa SIN bloquear el arranque ni la pantalla.
+    Al terminar, avisa el resultado (éxito o sin conexión) en el holograma."""
+    exito = True
+    try:
+        _calibrar_hora_red()
+    except Exception:
+        exito = False
+    try:
+        _calibrar_tasa_red()
+    except Exception:
+        exito = False
+
+    def informar(_dt):
+        if PANTALLA is None or not hasattr(PANTALLA, "holograma"):
+            return
+        if exito:
+            PANTALLA.holograma.subtitulo.text = "Conectado -- hora y tasa actualizadas"
+        else:
+            PANTALLA.holograma.subtitulo.text = "Sin conexión -- usando los últimos datos guardados"
+        actualizar_medidor()
+
+    Clock.schedule_once(informar, 0)
 
 
 def convertir_a_usdt(monto, moneda):
@@ -627,16 +651,23 @@ def sueldo_aplicar(cuenta_origen_id):
                 (ahora_iso, "ingreso", d["monto"], d["moneda"], monto_usdt, "Ingreso", d["cuenta_destino_id"]))
     texto_origen = ""
     if cuenta_origen_id:
-        cuenta_origen = con.execute("SELECT nombre, saldo, moneda FROM cuentas WHERE id=?",
+        cuenta_origen = con.execute("SELECT nombre, saldo, moneda, comision_porcentaje FROM cuentas WHERE id=?",
                                     (cuenta_origen_id,)).fetchone()
         delta_origen_moneda = monto_usdt * obtener_tasas()["paralelo"] if cuenta_origen[2] == "VES" else monto_usdt
-        nuevo_saldo_origen = cuenta_origen[1] - delta_origen_moneda
+        comision_moneda = round(delta_origen_moneda * (cuenta_origen[3] / 100), 2)
+        nuevo_saldo_origen = cuenta_origen[1] - delta_origen_moneda - comision_moneda
         con.execute("UPDATE cuentas SET saldo=? WHERE id=?", (nuevo_saldo_origen, cuenta_origen_id))
         con.execute("INSERT INTO movimientos (fecha, tipo, monto, moneda, monto_usdt, categoria, cuenta_id) "
                     "VALUES (?,'gasto',?,?,?,?,?)",
                     (ahora_iso, round(delta_origen_moneda, 2), cuenta_origen[2], monto_usdt, "Transferencia",
                      cuenta_origen_id))
         texto_origen = f" (salió de {cuenta_origen[0]}, nuevo saldo {round(nuevo_saldo_origen, 2)} {cuenta_origen[2]})"
+        if comision_moneda > 0:
+            con.execute("INSERT INTO movimientos (fecha, tipo, monto, moneda, monto_usdt, categoria, cuenta_id) "
+                        "VALUES (?,'gasto',?,?,?,?,?)",
+                        (ahora_iso, comision_moneda, cuenta_origen[2],
+                         convertir_a_usdt(comision_moneda, cuenta_origen[2]), "Comisión bancaria", cuenta_origen_id))
+            texto_origen += f" -- comisión {cuenta_origen[3]}%: {comision_moneda} {cuenta_origen[2]}"
     lineas_estrategia = aplicar_estrategia_ingreso(con, monto_usdt)
     con.execute("UPDATE config_sueldo SET ultima_confirmacion=? WHERE id=1", (hoy_str,))
     con.commit()
@@ -880,6 +911,102 @@ def terminar_flujo():
     ESTADO["datos"] = {}
 
 
+# ==================== HOLOGRAMA DE JOI (asistente visual) ====================
+
+_RUTA_HOLOGRAMA = os.path.join(os.path.dirname(__file__), "assets", "holograma")
+
+
+class HologramaJoi(BoxLayout):
+    """Muestra la imagen fija de Joi (con su efecto de holograma) y, cuando hay
+    una animación grabada para la frase actual, la reproduce cuadro por cuadro
+    a partir de un 'sprite sheet' (varios fotogramas en una sola imagen)."""
+
+    def __init__(self, **kwargs):
+        super().__init__(orientation="vertical", size_hint=(1, None), height=dp(190), spacing=dp(4), **kwargs)
+        self.zona_imagen = Widget(size_hint=(1, 1))
+        with self.zona_imagen.canvas:
+            self._color = Color(1, 1, 1, 1)
+            self._rect = Rectangle()
+        self.zona_imagen.bind(pos=self._redibujar, size=self._redibujar)
+        self.add_widget(self.zona_imagen)
+
+        self.subtitulo = Label(text="", font_name="PoppinsMedium", font_size=dp(13), color=COLOR_TEXTO,
+                               size_hint=(1, None), height=dp(30), halign="center", valign="top")
+        self.subtitulo.bind(size=lambda inst, s: setattr(inst, "text_size", s))
+        self.add_widget(self.subtitulo)
+
+        self._animaciones = {}
+        self._textura_estatica = None
+        self._evento = None
+
+    def _redibujar(self, *_):
+        self._rect.pos = self.zona_imagen.pos
+        self._rect.size = self.zona_imagen.size
+
+    def cargar_estatica(self, ruta):
+        try:
+            self._textura_estatica = CoreImage(ruta).texture
+            self._mostrar_textura_completa(self._textura_estatica)
+        except Exception:
+            pass
+
+    def cargar_animacion(self, nombre, ruta, columnas, filas, n_frames):
+        try:
+            textura = CoreImage(ruta).texture
+            self._animaciones[nombre] = (textura, columnas, filas, n_frames)
+        except Exception:
+            pass
+
+    def _mostrar_textura_completa(self, textura):
+        self._rect.texture = textura
+        self._rect.tex_coords = (0, 0, 1, 0, 1, 1, 0, 1)
+        self._redibujar()
+
+    def _mostrar_frame(self, textura, columnas, filas, idx):
+        col = idx % columnas
+        fila = idx // columnas
+        u0, u1 = col / columnas, (col + 1) / columnas
+        v0, v1 = 1 - (fila + 1) / filas, 1 - fila / filas
+        self._rect.texture = textura
+        self._rect.tex_coords = (u0, v0, u1, v0, u1, v1, u0, v1)
+        self._redibujar()
+
+    def reproducir(self, nombre_animacion, texto_subtitulo):
+        if self.subtitulo.text != texto_subtitulo:
+            self.subtitulo.text = texto_subtitulo
+        if self._evento:
+            self._evento.cancel()
+            self._evento = None
+        if not nombre_animacion or nombre_animacion not in self._animaciones:
+            if self._textura_estatica:
+                self._mostrar_textura_completa(self._textura_estatica)
+            return
+        textura, columnas, filas, n_frames = self._animaciones[nombre_animacion]
+        estado = {"idx": 0}
+
+        def avanzar(dt):
+            if estado["idx"] >= n_frames:
+                self._evento.cancel()
+                self._evento = None
+                if self._textura_estatica:
+                    self._mostrar_textura_completa(self._textura_estatica)
+                return
+            self._mostrar_frame(textura, columnas, filas, estado["idx"])
+            estado["idx"] += 1
+
+        self._evento = Clock.schedule_interval(avanzar, 1 / 10)
+
+
+def actualizar_holograma(texto_pantalla, hablar):
+    if PANTALLA is None or not hasattr(PANTALLA, "holograma"):
+        return
+    if hablar:
+        nombre_animacion, subtitulo = hablar
+    else:
+        nombre_animacion, subtitulo = None, (texto_pantalla or "").strip().split("\n")[0][:70]
+    PANTALLA.holograma.reproducir(nombre_animacion, subtitulo)
+
+
 COLOR_LIQUIDO_VERDE = (0.62, 0.86, 0.20, 1)
 COLOR_TUBO_FONDO = (0.93, 0.97, 0.85, 1)
 COLOR_CASCO_NEGRO = (0.08, 0.08, 0.09, 1)
@@ -997,6 +1124,13 @@ class MainScreen(Screen):
         self.titulo.bind(size=lambda inst, s: setattr(inst, "text_size", s))
         raiz.add_widget(self.titulo)
 
+        self.holograma = HologramaJoi()
+        self.holograma.cargar_estatica(os.path.join(_RUTA_HOLOGRAMA, "estatica.jpg"))
+        self.holograma.cargar_animacion("saludo", os.path.join(_RUTA_HOLOGRAMA, "sprite_saludo.jpg"), 8, 9, 72)
+        self.holograma.cargar_animacion("porcobrar", os.path.join(_RUTA_HOLOGRAMA, "sprite_porcobrar.jpg"), 7, 6, 42)
+        self.holograma.cargar_animacion("registrar", os.path.join(_RUTA_HOLOGRAMA, "sprite_registrar.jpg"), 5, 4, 19)
+        raiz.add_widget(self.holograma)
+
         tarjeta = BoxLayout(orientation="vertical", padding=dp(16), spacing=dp(12), size_hint=(1, 1))
         with tarjeta.canvas.before:
             Color(*COLOR_PANEL)
@@ -1015,9 +1149,9 @@ class MainScreen(Screen):
         raiz.add_widget(tarjeta)
 
         self.add_widget(raiz)
-        calibrar_hora()
-        render(saludo())
+        render(saludo(), hablar=("saludo", "¡Hola Juan! ¿Qué quieres hacer?"))
         pantalla_inicio()
+        threading.Thread(target=calibrar_en_segundo_plano, daemon=True).start()
         programar_todas_las_alarmas(mostrar_error_en_pantalla=True)
 
     def _actualizar_bg(self, *_):
@@ -1087,7 +1221,7 @@ def _con_cancelar(filas_botones):
     return filas_botones
 
 
-def render(texto, filas_botones=None, pedir_texto=False, teclado_numero=False):
+def render(texto, filas_botones=None, pedir_texto=False, teclado_numero=False, hablar=None):
     """Equivalente a enviar()/editar() del bot: redibuja título + botones,
     y opcionalmente un campo de texto para el paso actual.
     teclado_numero=True muestra el teclado numérico del teléfono (para montos, días, etc.)."""
@@ -1126,6 +1260,7 @@ def render(texto, filas_botones=None, pedir_texto=False, teclado_numero=False):
             cont.add_widget(row)
 
     actualizar_medidor()
+    actualizar_holograma(texto, hablar)
 
 
 # ==================== DESPACHO: CALLBACKS (botones) ====================
@@ -1217,6 +1352,12 @@ def manejar_callback(data):
         return
     if data.startswith("saldo:editarid:"):
         saldo_editar_iniciar(int(partes[2]))
+        return
+    if data == "saldo:editarcomision":
+        saldo_editarcomision_menu()
+        return
+    if data.startswith("saldo:editarcomisionid:"):
+        saldo_editarcomision_iniciar(int(partes[2]))
         return
     if data == "saldo:anexar:agregar":
         saldo_anexar_agregar_iniciar()
@@ -1433,6 +1574,7 @@ def manejar_texto(texto):
         "prestamo": porcobrar_texto, "porcobrar_nuevo": porcobrar_texto,
         "pagado": pagado_texto, "ajustar_aviso": ajustar_aviso_texto,
         "saldo_editar": saldo_editar_texto,
+        "saldo_editarcomision": saldo_editarcomision_texto,
         "horario_editar": horario_editar_texto,
         "sueldo_config": sueldo_config_texto,
         "sueldo_editar_monto_dia": sueldo_editar_monto_dia_texto,
@@ -1486,7 +1628,8 @@ def manejar_calendario(data, partes):
 def registrar_iniciar():
     iniciar_flujo("registrar", "tipo")
     render("¿Ingreso o gasto?",
-           [[("Ingreso", "reg:tipo:ingreso"), ("Gasto", "reg:tipo:gasto")], [("Borrar uno", "reg:borrar")]])
+           [[("Ingreso", "reg:tipo:ingreso"), ("Gasto", "reg:tipo:gasto")], [("Borrar uno", "reg:borrar")]],
+           hablar=("registrar", "Registrar"))
 
 
 def registrar_borrar_menu():
@@ -1734,7 +1877,41 @@ def estatus_mostrar():
 def saldo_anexar_menu():
     render("¿Qué quieres hacer?",
            [[("Agregar cuenta nueva", "saldo:anexar:agregar")], [("Quitar una cuenta", "saldo:anexar:quitar")],
-            [("Editar saldo", "saldo:editar")], [("Volver", "menu:saldo")]])
+            [("Editar saldo", "saldo:editar")], [("Editar comisión", "saldo:editarcomision")],
+            [("Volver", "menu:saldo")]])
+
+
+def saldo_editarcomision_menu():
+    con = conectar()
+    cuentas = con.execute("SELECT id, nombre, comision_porcentaje FROM cuentas ORDER BY id").fetchall()
+    con.close()
+    if not cuentas:
+        render("No tienes cuentas todavía.", [[("Volver", "saldo:anexar")]])
+        return
+    filas = [[(f"{n} ({c}%)", f"saldo:editarcomisionid:{i}")] for i, n, c in cuentas]
+    filas.append([("Volver", "saldo:anexar")])
+    render("¿A cuál cuenta le ajustas la comisión?", filas)
+
+
+def saldo_editarcomision_iniciar(cuenta_id):
+    iniciar_flujo("saldo_editarcomision", "valor", {"cuenta_id": cuenta_id})
+    render("¿Qué porcentaje de comisión cobra esta cuenta cuando envías dinero DESDE ella hacia otra "
+           "cuenta tuya? (0 si no aplica)", pedir_texto=True, teclado_numero=True)
+
+
+def saldo_editarcomision_texto(texto):
+    try:
+        valor = parsear_monto(texto)
+    except ValueError:
+        render("Escribe solo el número.", pedir_texto=True, teclado_numero=True)
+        return
+    con = conectar()
+    con.execute("UPDATE cuentas SET comision_porcentaje=? WHERE id=?", (valor, ESTADO["datos"]["cuenta_id"]))
+    con.commit()
+    con.close()
+    terminar_flujo()
+    sonido("exito")
+    render("Comisión actualizada.", [[("Menú", "menu:main")]])
 
 
 def saldo_editar_menu():
@@ -1808,15 +1985,31 @@ def anexar_cuenta_texto(texto):
             return
         ESTADO["paso"] = "moneda"
         render("¿Moneda?", [[("USD", "anexar:moneda:USD"), ("USDT", "anexar:moneda:USDT"), ("VES", "anexar:moneda:VES")]])
+        return
+    if ESTADO["paso"] == "comision":
+        try:
+            d["comision"] = parsear_monto(texto)
+        except ValueError:
+            render("Escribe solo el número (0 si no cobra comisión).", pedir_texto=True, teclado_numero=True)
+            return
+        anexar_cuenta_finalizar()
 
 
 def anexar_cuenta_callback(moneda):
     d = ESTADO["datos"]
+    d["moneda"] = moneda
+    ESTADO["paso"] = "comision"
+    render("¿Esta cuenta cobra comisión cuando le envías dinero DESDE ella hacia otra cuenta tuya? "
+           "Escribe el porcentaje (ej: 0.30), o 0 si no aplica.", pedir_texto=True, teclado_numero=True)
+
+
+def anexar_cuenta_finalizar():
+    d = ESTADO["datos"]
     con = conectar()
     try:
-        con.execute("INSERT INTO cuentas (nombre, grupo, saldo, moneda, ultima_confirmacion) "
-                    "VALUES (?, 'sin_grupo', ?, ?, ?)",
-                    (d["nombre"], d["saldo"], moneda, ahora().isoformat()))
+        con.execute("INSERT INTO cuentas (nombre, grupo, saldo, moneda, ultima_confirmacion, comision_porcentaje) "
+                    "VALUES (?, 'sin_grupo', ?, ?, ?, ?)",
+                    (d["nombre"], d["saldo"], d["moneda"], ahora().isoformat(), d["comision"]))
         con.commit()
         render(f"Cuenta '{d['nombre']}' agregada.", [[("Menú", "menu:main")]])
         sonido("exito")
@@ -2444,7 +2637,8 @@ def pago_pausar_prioridad3():
 def porcobrar_menu():
     render("¿Qué quieres hacer?",
            [[("Préstamo", "pc:prestamo"), ("Por cobrar", "pc:cobrar")], [("Pagado", "pc:pagado")],
-            [("Volver", "menu:main")]])
+            [("Volver", "menu:main")]],
+           hablar=("porcobrar", "Por cobrar"))
 
 
 def prestamo_iniciar():
