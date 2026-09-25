@@ -16,6 +16,8 @@ import requests
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.stencilview import StencilView
 from kivy.uix.widget import Widget
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.label import Label
@@ -28,6 +30,7 @@ from kivy.core.audio import SoundLoader
 from kivy.graphics import Color, Rectangle, RoundedRectangle
 from kivy.core.image import Image as CoreImage
 from kivy.clock import Clock
+from kivy.animation import Animation
 
 # ==================== TEMA VISUAL (navy + morado, fuente Poppins) ====================
 COLOR_FONDO = (0.06, 0.07, 0.13, 1)
@@ -47,6 +50,7 @@ LabelBase.register(name="Poppins",
 LabelBase.register(name="PoppinsSemiBold", fn_regular=os.path.join(_FONT_DIR, "Poppins-SemiBold.ttf"))
 LabelBase.register(name="PoppinsMedium", fn_regular=os.path.join(_FONT_DIR, "Poppins-Medium.ttf"))
 LabelBase.register(name="DSEG7", fn_regular=os.path.join(_FONT_DIR, "DSEG7Classic-Bold.ttf"))
+LabelBase.register(name="Orbitron", fn_regular=os.path.join(_FONT_DIR, "Orbitron-Bold.ttf"))
 
 # ==================== SONIDOS ====================
 _SOUND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "sounds")
@@ -81,9 +85,9 @@ CATEGORIAS_GASTO = ["Comida", "Combustible", "Otro"]
 CATEGORIAS_INGRESO = ["Ingreso", "Retorno de saldo"]
 
 ESTRATEGIAS = {
-    "speed":  {"fase1": (0.30, 0.55, 0.15), "fase2": (0.65, 0.20, 0.15)},
-    "medium": {"fase1": (0.50, 0.35, 0.15), "fase2": (0.50, 0.30, 0.20)},
-    "live":   {"fase1": (0.40, 0.20, 0.40), "fase2": (0.20, 0.20, 0.60)},
+    "speed":  (0.65, 0.20, 0.15),
+    "medium": (0.50, 0.30, 0.20),
+    "live":   (0.20, 0.20, 0.60),
 }
 
 
@@ -247,10 +251,10 @@ def calibrar_en_segundo_plano():
     def informar(_dt):
         if PANTALLA is None or not hasattr(PANTALLA, "holograma"):
             return
-        if exito:
-            PANTALLA.holograma.subtitulo.text = "Conectado -- hora y tasa actualizadas"
-        else:
-            PANTALLA.holograma.subtitulo.text = "Sin conexión -- usando los últimos datos guardados"
+        texto = "Conectado -- hora y tasa actualizadas" if exito else \
+            "Sin conexión -- usando los últimos datos guardados"
+        PANTALLA.holograma._texto_subtitulo_actual = texto
+        PANTALLA.holograma._escribir_subtitulo(texto)
         actualizar_medidor()
 
     Clock.schedule_once(informar, 0)
@@ -368,66 +372,6 @@ def calcular_objetivo_activo(con):
     return con.execute(
         "SELECT id, nombre, monto_meta, monto_actual, moneda FROM objetivos WHERE estado='activo' "
         "ORDER BY (fecha_limite IS NULL), fecha_limite ASC, id ASC LIMIT 1").fetchone()
-
-
-def aplicar_estrategia_ingreso(con, monto_usdt):
-    cfg = con.execute("SELECT colchon_meta, colchon_actual, estrategia_activa FROM config_estrategia WHERE id=1").fetchone()
-    colchon_meta, colchon_actual, estrategia_activa = cfg
-    lineas = []
-    estatus_actual = estatus_calcular(con)["estado"]
-    if estatus_actual == "Crítico" and estrategia_activa != "live":
-        estrategia_usar = "live"
-        lineas.append("(Estatus Crítico -- se usó LIVE en vez de tu estrategia elegida para protegerte)")
-    else:
-        estrategia_usar = estrategia_activa
-    tabla = ESTRATEGIAS.get(estrategia_usar, ESTRATEGIAS["medium"])
-    if colchon_actual < colchon_meta:
-        pct_colchon, pct_deuda, pct_libre = tabla["fase1"]
-        pct_ahorro = 0.0
-    else:
-        pct_deuda, pct_ahorro, pct_libre = tabla["fase2"]
-        pct_colchon = 0.0
-    monto_colchon = round(monto_usdt * pct_colchon, 2)
-    monto_deuda = round(monto_usdt * pct_deuda, 2)
-    monto_ahorro = round(monto_usdt * pct_ahorro, 2)
-    monto_libre = round(monto_usdt * pct_libre, 2)
-    if monto_colchon:
-        nuevo_colchon = round(colchon_actual + monto_colchon, 2)
-        con.execute("UPDATE config_estrategia SET colchon_actual=? WHERE id=1", (nuevo_colchon,))
-        lineas.append(f"Colchón: +{monto_colchon} (ahora {nuevo_colchon} de {colchon_meta})")
-    deuda = calcular_deuda_mayor_interes(con)
-    if deuda and monto_deuda:
-        deuda_id, deuda_nombre, deuda_total, deuda_pagado, deuda_moneda = deuda
-        monto_deuda_en_su_moneda = round(convertir_de_usdt(monto_deuda, deuda_moneda), 2)
-        nuevo_pagado = min(deuda_pagado + monto_deuda_en_su_moneda, deuda_total)
-        con.execute("UPDATE deudas SET monto_pagado=? WHERE id=?", (nuevo_pagado, deuda_id))
-        con.execute("INSERT INTO deuda_pagos (deuda_id, monto, fecha) VALUES (?, ?, ?)",
-                    (deuda_id, monto_deuda_en_su_moneda, ahora().isoformat()))
-        if nuevo_pagado >= deuda_total:
-            con.execute("UPDATE deudas SET estado='pagada' WHERE id=?", (deuda_id,))
-            lineas.append(f"Deuda '{deuda_nombre}': +{monto_deuda_en_su_moneda} {deuda_moneda} -- ¡saldada!")
-        else:
-            lineas.append(f"Deuda '{deuda_nombre}' (mayor interés): +{monto_deuda_en_su_moneda} {deuda_moneda} "
-                          f"(falta {round(deuda_total - nuevo_pagado, 2)} {deuda_moneda})")
-    elif monto_deuda:
-        monto_libre += monto_deuda
-    objetivo = calcular_objetivo_activo(con)
-    if objetivo and monto_ahorro:
-        obj_id, obj_nombre, obj_meta, obj_actual, obj_moneda = objetivo
-        monto_ahorro_en_su_moneda = round(convertir_de_usdt(monto_ahorro, obj_moneda), 2)
-        nuevo_actual = min(obj_actual + monto_ahorro_en_su_moneda, obj_meta)
-        con.execute("UPDATE objetivos SET monto_actual=? WHERE id=?", (nuevo_actual, obj_id))
-        if nuevo_actual >= obj_meta:
-            con.execute("UPDATE objetivos SET estado='cumplido' WHERE id=?", (obj_id,))
-            lineas.append(f"Objetivo '{obj_nombre}': +{monto_ahorro_en_su_moneda} {obj_moneda} -- ¡cumplido!")
-        else:
-            lineas.append(f"Objetivo '{obj_nombre}': +{monto_ahorro_en_su_moneda} {obj_moneda} "
-                          f"(falta {round(obj_meta - nuevo_actual, 2)} {obj_moneda})")
-    elif monto_ahorro:
-        monto_libre += monto_ahorro
-    lineas.append(f"Libre: +{round(monto_libre, 2)}")
-    con.commit()
-    return lineas
 
 
 # ==================== NOTIFICACIONES (Android) ====================
@@ -668,15 +612,12 @@ def sueldo_aplicar(cuenta_origen_id):
                         (ahora_iso, comision_moneda, cuenta_origen[2],
                          convertir_a_usdt(comision_moneda, cuenta_origen[2]), "Comisión bancaria", cuenta_origen_id))
             texto_origen += f" -- comisión {cuenta_origen[3]}%: {comision_moneda} {cuenta_origen[2]}"
-    lineas_estrategia = aplicar_estrategia_ingreso(con, monto_usdt)
     con.execute("UPDATE config_sueldo SET ultima_confirmacion=? WHERE id=1", (hoy_str,))
     con.commit()
     con.close()
     terminar_flujo()
     texto = (f"Sueldo registrado: {d['monto']} {d['moneda']} en {cuenta_destino[0]}{texto_origen}.\n"
              f"Nuevo saldo {cuenta_destino[0]}: {round(nuevo_saldo_destino, 2)} {cuenta_destino[2]}")
-    if lineas_estrategia:
-        texto += "\n\nRepartido según tu estrategia:\n" + "\n".join(lineas_estrategia)
     sonido("exito")
     render(texto, [[("Menú", "menu:main")]])
 
@@ -919,29 +860,42 @@ _RUTA_HOLOGRAMA = os.path.join(os.path.dirname(__file__), "assets", "holograma")
 class HologramaJoi(BoxLayout):
     """Muestra la imagen fija de Joi (con su efecto de holograma) y, cuando hay
     una animación grabada para la frase actual, la reproduce cuadro por cuadro
-    a partir de un 'sprite sheet' (varios fotogramas en una sola imagen)."""
+    a partir de un 'sprite sheet' (varios fotogramas en una sola imagen).
+    El subtítulo va centrado y superpuesto DENTRO del mismo recuadro negro,
+    no debajo -- toda interacción de la app se refleja aquí, letra por letra."""
 
     def __init__(self, **kwargs):
-        super().__init__(orientation="vertical", size_hint=(1, None), height=dp(190), spacing=dp(4), **kwargs)
-        self.zona_imagen = Widget(size_hint=(1, 1))
-        with self.zona_imagen.canvas:
-            self._color = Color(1, 1, 1, 1)
+        super().__init__(orientation="vertical", size_hint=(1, None), height=dp(210), **kwargs)
+        self.marco = FloatLayout(size_hint=(1, 1))
+        with self.marco.canvas.before:
+            Color(0.02, 0.02, 0.03, 1)
+            self._fondo_negro = RoundedRectangle(radius=[dp(14)])
+            self._color = Color(1, 1, 1, 0)
             self._rect = Rectangle()
-        self.zona_imagen.bind(pos=self._redibujar, size=self._redibujar)
-        self.add_widget(self.zona_imagen)
+        self.marco.bind(pos=self._redibujar, size=self._redibujar)
+        self.add_widget(self.marco)
 
-        self.subtitulo = Label(text="", font_name="PoppinsMedium", font_size=dp(13), color=COLOR_TEXTO,
-                               size_hint=(1, None), height=dp(30), halign="center", valign="top")
-        self.subtitulo.bind(size=lambda inst, s: setattr(inst, "text_size", s))
-        self.add_widget(self.subtitulo)
+        self.recorte = StencilView(size_hint=(0.88, 0.85), pos_hint={"center_x": 0.5, "center_y": 0.5})
+        self.marco.add_widget(self.recorte)
+
+        self.subtitulo = Label(text="", font_name="Orbitron", font_size=dp(12.5), color=(0.78, 0.78, 0.78, 1),
+                               size_hint=(1, None), halign="center", valign="middle")
+        self.recorte.bind(size=lambda inst, s: setattr(self.subtitulo, "text_size", (s[0], None)))
+        self.subtitulo.bind(texture_size=lambda inst, ts: setattr(inst, "height", ts[1]))
+        self.recorte.add_widget(self.subtitulo)
 
         self._animaciones = {}
         self._textura_estatica = None
         self._evento = None
+        self._evento_subtitulo = None
+        self._texto_subtitulo_actual = None
+        self._anim_scroll = None
 
     def _redibujar(self, *_):
-        self._rect.pos = self.zona_imagen.pos
-        self._rect.size = self.zona_imagen.size
+        self._fondo_negro.pos = self.marco.pos
+        self._fondo_negro.size = self.marco.size
+        self._rect.pos = self.marco.pos
+        self._rect.size = self.marco.size
 
     def cargar_estatica(self, ruta):
         try:
@@ -960,6 +914,7 @@ class HologramaJoi(BoxLayout):
     def _mostrar_textura_completa(self, textura):
         self._rect.texture = textura
         self._rect.tex_coords = (0, 0, 1, 0, 1, 1, 0, 1)
+        self._color.a = 1
         self._redibujar()
 
     def _mostrar_frame(self, textura, columnas, filas, idx):
@@ -969,11 +924,81 @@ class HologramaJoi(BoxLayout):
         v0, v1 = 1 - (fila + 1) / filas, 1 - fila / filas
         self._rect.texture = textura
         self._rect.tex_coords = (u0, v0, u1, v0, u1, v1, u0, v1)
+        self._color.a = 1
         self._redibujar()
 
+    def _escribir_subtitulo(self, texto):
+        """Si el texto cabe en el recuadro: efecto 'máquina de escribir' (letra
+        por letra, centrado). Si es largo (un reporte, un informe): se muestra
+        completo y se desplaza de abajo hacia arriba en bucle continuo, como
+        créditos de película, hasta que cambie de pantalla (se pulse Menú u
+        otro botón)."""
+        if self._evento_subtitulo:
+            self._evento_subtitulo.cancel()
+            self._evento_subtitulo = None
+        if self._anim_scroll:
+            self._anim_scroll.cancel(self.subtitulo)
+            self._anim_scroll = None
+        Animation.cancel_all(self.subtitulo, "y")
+
+        def comenzar(*_):
+            self.subtitulo.opacity = 1
+            self.subtitulo.pos_hint = {"center_x": 0.5, "center_y": 0.5}
+            self.subtitulo.text = texto
+            Clock.schedule_once(lambda dt: self._decidir_presentacion(texto), 0)
+
+        anim = Animation(opacity=0, duration=0.09)
+        anim.bind(on_complete=comenzar)
+        anim.start(self.subtitulo)
+
+    def _decidir_presentacion(self, texto):
+        if self.subtitulo.height <= self.recorte.height or self.recorte.height <= 0:
+            self.subtitulo.pos_hint = {"center_x": 0.5, "center_y": 0.5}
+            self.subtitulo.text = ""
+            estado = {"i": 0}
+
+            def avanzar(dt):
+                estado["i"] += 1
+                self.subtitulo.text = texto[:estado["i"]]
+                if estado["i"] >= len(texto) and self._evento_subtitulo:
+                    self._evento_subtitulo.cancel()
+                    self._evento_subtitulo = None
+
+            self._evento_subtitulo = Clock.schedule_interval(avanzar, 0.020)
+        else:
+            self._iniciar_scroll_creditos()
+
+    def _iniciar_scroll_creditos(self):
+        """Sube desde abajo hasta mostrar el final del texto y se queda quieta
+        ahí unos segundos (sin apagarse) antes de bajar de nuevo y repetir --
+        en bucle, hasta que la pantalla cambie (se toque otro botón)."""
+        self.subtitulo.pos_hint = {}
+        self.subtitulo.x = self.recorte.x
+        y_inicio = self.recorte.y
+        y_fin = self.recorte.y - self.subtitulo.height
+        distancia = y_inicio - y_fin
+        duracion = max(distancia / 16, 4)
+
+        def reiniciar(dt):
+            self.subtitulo.y = y_inicio
+            subir()
+
+        def al_llegar(anim, widget):
+            self._evento_subtitulo = Clock.schedule_once(reiniciar, 2.2)
+
+        def subir():
+            sig = Animation(y=y_fin, duration=duracion, t="linear")
+            sig.bind(on_complete=al_llegar)
+            self._anim_scroll = sig
+            sig.start(self.subtitulo)
+
+        self.subtitulo.y = y_inicio
+        subir()
+
     def reproducir(self, nombre_animacion, texto_subtitulo):
-        if self.subtitulo.text != texto_subtitulo:
-            self.subtitulo.text = texto_subtitulo
+        if texto_subtitulo != self._texto_subtitulo_actual:
+            self._texto_subtitulo_actual = texto_subtitulo
+            self._escribir_subtitulo(texto_subtitulo)
         if self._evento:
             self._evento.cancel()
             self._evento = None
@@ -1003,7 +1028,7 @@ def actualizar_holograma(texto_pantalla, hablar):
     if hablar:
         nombre_animacion, subtitulo = hablar
     else:
-        nombre_animacion, subtitulo = None, (texto_pantalla or "").strip().split("\n")[0][:70]
+        nombre_animacion, subtitulo = None, (texto_pantalla or "").strip()
     PANTALLA.holograma.reproducir(nombre_animacion, subtitulo)
 
 
@@ -1758,9 +1783,6 @@ def finalizar_registro(datos):
     con.execute("INSERT INTO movimientos (fecha, tipo, monto, moneda, monto_usdt, categoria, cuenta_id) "
                 "VALUES (?,?,?,?,?,?,?)",
                 (ahora_iso, datos["tipo"], datos["monto"], datos["moneda"], monto_usdt, datos["categoria"], datos["cuenta_id"]))
-    lineas_estrategia = []
-    if datos["tipo"] == "ingreso" and datos["categoria"] != "Retorno de saldo":
-        lineas_estrategia = aplicar_estrategia_ingreso(con, monto_usdt)
     con.commit()
     advertencias = []
     if datos["tipo"] == "gasto":
@@ -1774,8 +1796,6 @@ def finalizar_registro(datos):
     texto = (f"{verbo} registrado: {datos['monto']} {datos['moneda']} ({datos['categoria']})\n"
              f"{'Entra a' if datos['tipo'] == 'ingreso' else 'Sale de'} {cuenta[0]}.\n"
              f"Nuevo saldo {cuenta[0]}: {round(nuevo_saldo, 2)} {cuenta[2]}")
-    if lineas_estrategia:
-        texto += "\n\nRepartido según tu estrategia:\n" + "\n".join(lineas_estrategia)
     if advertencias:
         texto += "\n\n" + "\n".join(advertencias)
     sonido("exito")
@@ -2032,15 +2052,6 @@ def deudas_menu():
 
 def recalcular_estrategia_ejecutar():
     con = conectar()
-    con.execute("UPDATE config_estrategia SET colchon_actual=0 WHERE id=1")
-    con.execute("UPDATE deudas SET monto_pagado=0 WHERE estado='activa'")
-    con.execute("UPDATE objetivos SET monto_actual=0 WHERE estado='activo'")
-    con.execute("DELETE FROM deuda_pagos WHERE deuda_id IN (SELECT id FROM deudas WHERE estado='activa')")
-    con.commit()
-    ingresos = con.execute(
-        "SELECT monto_usdt FROM movimientos WHERE tipo='ingreso' AND categoria='Ingreso' ORDER BY fecha ASC").fetchall()
-    for (monto_usdt,) in ingresos:
-        aplicar_estrategia_ingreso(con, monto_usdt)
     deudas_cuotas = con.execute(
         "SELECT id, nombre, monto_total, moneda, dia_pago FROM deudas WHERE estado='activa' "
         "AND tipo_pago='cuotas' AND dia_pago IS NOT NULL").fetchall()
@@ -2056,7 +2067,6 @@ def deudas_ver():
     filas_db = con.execute(
         "SELECT nombre, monto_total, monto_pagado, moneda, interes_mensual, fecha_limite, tipo_pago, dia_pago "
         "FROM deudas WHERE estado='activa'").fetchall()
-    colchon_meta, colchon_actual = con.execute("SELECT colchon_meta, colchon_actual FROM config_estrategia WHERE id=1").fetchone()
     con.close()
     if not filas_db:
         texto = "No tienes deudas activas."
@@ -2070,7 +2080,6 @@ def deudas_ver():
             extra += f", vence {limite}" if limite else ""
             lineas.append(f"{n}: falta {falta} {moneda}{extra}")
         texto = "Deudas activas:\n" + "\n".join(lineas)
-    texto += f"\n\nColchón: {colchon_actual} de {colchon_meta}"
     render(texto, [[("Volver", "deuda:menu")]])
 
 
@@ -2218,11 +2227,10 @@ def informe_mostrar():
         render("No tienes deudas activas.", [[("Volver", "deuda:menu")]])
         return
     estatus_info = estatus_calcular(con)
-    cfg = con.execute("SELECT colchon_meta, colchon_actual, estrategia_activa FROM config_estrategia WHERE id=1").fetchone()
-    colchon_meta, colchon_actual, estrategia_activa = cfg
+    estrategia_activa = con.execute("SELECT estrategia_activa FROM config_estrategia WHERE id=1").fetchone()[0]
     estrategia_usar = "live" if estatus_info["estado"] == "Crítico" else estrategia_activa
     tabla_estr = ESTRATEGIAS.get(estrategia_usar, ESTRATEGIAS["medium"])
-    pct_deuda = tabla_estr["fase1"][1] if colchon_actual < colchon_meta else tabla_estr["fase2"][0]
+    pct_deuda = tabla_estr[0]
     cuota_estimada_usdt = estatus_info["saldo_total_usdt"] * pct_deuda
     prioritaria = calcular_deuda_mayor_interes(con)
     bloques = []
@@ -2302,14 +2310,13 @@ def deuda_guardar(datos, fecha_seleccionada, dia_pago_directo=None):
 
 
 def calcular_resumen_cuotas(con, deuda_id, nombre, monto_total, moneda, dia_pago):
-    cfg = con.execute("SELECT colchon_meta, colchon_actual, estrategia_activa FROM config_estrategia WHERE id=1").fetchone()
-    colchon_meta, colchon_actual, estrategia_activa = cfg
+    estrategia_activa = con.execute("SELECT estrategia_activa FROM config_estrategia WHERE id=1").fetchone()[0]
     estatus_info = estatus_calcular(con)
     estatus_actual = estatus_info["estado"]
     saldo_total_usdt = estatus_info["saldo_total_usdt"]
     estrategia_usar = "live" if estatus_actual == "Crítico" else estrategia_activa
     tabla = ESTRATEGIAS.get(estrategia_usar, ESTRATEGIAS["medium"])
-    pct_deuda = tabla["fase1"][1] if colchon_actual < colchon_meta else tabla["fase2"][0]
+    pct_deuda = tabla[0]
     hoy = ahora().date()
     proxima = hoy.replace(day=min(dia_pago, 28)) if hoy.day <= dia_pago else \
         (hoy.replace(day=1) + timedelta(days=32)).replace(day=min(dia_pago, 28))
