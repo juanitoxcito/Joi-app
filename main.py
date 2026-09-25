@@ -926,73 +926,106 @@ class HologramaJoi(BoxLayout):
         self._color.a = 1
         self._redibujar()
 
-    def _escribir_subtitulo(self, texto):
-        """Si el texto cabe en el recuadro: efecto 'máquina de escribir' (letra
-        por letra, centrado). Si es largo (un reporte, un informe): se muestra
-        completo y se desplaza de abajo hacia arriba en bucle continuo, como
-        créditos de película, hasta que cambie de pantalla (se pulse Menú u
-        otro botón)."""
+    def _mostrar_directo(self, texto, error=None):
+        """Red de seguridad: garantiza que el texto se vea sí o sí, aunque la
+        animación falle por algún motivo. Si hubo un error, lo muestra para
+        poder diagnosticarlo (igual que hacemos con los errores de alarmas)."""
         if self._evento_subtitulo:
             self._evento_subtitulo.cancel()
             self._evento_subtitulo = None
         if self._anim_scroll:
             self._anim_scroll.cancel(self.subtitulo)
             self._anim_scroll = None
-        Animation.cancel_all(self.subtitulo, "y")
+        Animation.cancel_all(self.subtitulo)
+        self.subtitulo.opacity = 1
+        self.subtitulo.pos_hint = {"center_x": 0.5, "center_y": 0.5}
+        self.subtitulo.text = texto if not error else f"{texto}\n\n[ERROR holograma: {error}]"
 
-        def comenzar(*_):
-            self.subtitulo.opacity = 1
-            self.subtitulo.pos_hint = {"center_x": 0.5, "center_y": 0.5}
-            self.subtitulo.text = texto
-            Clock.schedule_once(lambda dt: self._decidir_presentacion(texto), 0)
+    def _escribir_subtitulo(self, texto):
+        """Si el texto cabe en el recuadro: efecto 'máquina de escribir' (letra
+        por letra, centrado). Si es largo (un reporte, un informe): se muestra
+        completo y se desplaza de abajo hacia arriba en bucle continuo, como
+        créditos de película, hasta que cambie de pantalla (se pulse Menú u
+        otro botón)."""
+        try:
+            if self._evento_subtitulo:
+                self._evento_subtitulo.cancel()
+                self._evento_subtitulo = None
+            if self._anim_scroll:
+                self._anim_scroll.cancel(self.subtitulo)
+                self._anim_scroll = None
+            Animation.cancel_all(self.subtitulo, "y")
 
-        anim = Animation(opacity=0, duration=0.09)
-        anim.bind(on_complete=comenzar)
-        anim.start(self.subtitulo)
+            def comenzar(*_):
+                try:
+                    self.subtitulo.opacity = 1
+                    self.subtitulo.pos_hint = {"center_x": 0.5, "center_y": 0.5}
+                    self.subtitulo.text = texto
+                    Clock.schedule_once(lambda dt: self._decidir_presentacion(texto), 0)
+                except Exception as e:
+                    self._mostrar_directo(texto, e)
+
+            anim = Animation(opacity=0, duration=0.09)
+            anim.bind(on_complete=comenzar)
+            anim.start(self.subtitulo)
+        except Exception as e:
+            self._mostrar_directo(texto, e)
 
     def _decidir_presentacion(self, texto):
-        if self.subtitulo.height <= self.recorte.height or self.recorte.height <= 0:
-            self.subtitulo.pos_hint = {"center_x": 0.5, "center_y": 0.5}
-            self.subtitulo.text = ""
-            estado = {"i": 0}
+        try:
+            if self.subtitulo.height <= self.recorte.height or self.recorte.height <= 0:
+                self.subtitulo.pos_hint = {"center_x": 0.5, "center_y": 0.5}
+                self.subtitulo.text = ""
+                estado = {"i": 0}
 
-            def avanzar(dt):
-                estado["i"] += 1
-                self.subtitulo.text = texto[:estado["i"]]
-                if estado["i"] >= len(texto) and self._evento_subtitulo:
-                    self._evento_subtitulo.cancel()
-                    self._evento_subtitulo = None
+                def avanzar(dt):
+                    try:
+                        estado["i"] += 1
+                        self.subtitulo.text = texto[:estado["i"]]
+                        if estado["i"] >= len(texto) and self._evento_subtitulo:
+                            self._evento_subtitulo.cancel()
+                            self._evento_subtitulo = None
+                    except Exception as e:
+                        self._mostrar_directo(texto, e)
 
-            self._evento_subtitulo = Clock.schedule_interval(avanzar, 0.020)
-        else:
-            self._iniciar_scroll_creditos()
+                self._evento_subtitulo = Clock.schedule_interval(avanzar, 0.020)
+            else:
+                self._iniciar_scroll_creditos(texto)
+        except Exception as e:
+            self._mostrar_directo(texto, e)
 
-    def _iniciar_scroll_creditos(self):
+    def _iniciar_scroll_creditos(self, texto):
         """Sube desde abajo hasta mostrar el final del texto y se queda quieta
         ahí unos segundos (sin apagarse) antes de bajar de nuevo y repetir --
         en bucle, hasta que la pantalla cambie (se toque otro botón)."""
-        self.subtitulo.pos_hint = {}
-        self.subtitulo.x = self.recorte.x
-        y_inicio = self.recorte.y
-        y_fin = self.recorte.y - self.subtitulo.height
-        distancia = y_inicio - y_fin
-        duracion = max(distancia / 16, 4)
+        try:
+            self.subtitulo.pos_hint = {}
+            self.subtitulo.x = self.recorte.x
+            y_inicio = self.recorte.y
+            y_fin = self.recorte.y - self.subtitulo.height
+            distancia = y_inicio - y_fin
+            duracion = max(distancia / 16, 4)
 
-        def reiniciar(dt):
+            def reiniciar(dt):
+                try:
+                    self.subtitulo.y = y_inicio
+                    subir()
+                except Exception as e:
+                    self._mostrar_directo(texto, e)
+
+            def al_llegar(anim, widget):
+                self._evento_subtitulo = Clock.schedule_once(reiniciar, 2.2)
+
+            def subir():
+                sig = Animation(y=y_fin, duration=duracion, t="linear")
+                sig.bind(on_complete=al_llegar)
+                self._anim_scroll = sig
+                sig.start(self.subtitulo)
+
             self.subtitulo.y = y_inicio
             subir()
-
-        def al_llegar(anim, widget):
-            self._evento_subtitulo = Clock.schedule_once(reiniciar, 2.2)
-
-        def subir():
-            sig = Animation(y=y_fin, duration=duracion, t="linear")
-            sig.bind(on_complete=al_llegar)
-            self._anim_scroll = sig
-            sig.start(self.subtitulo)
-
-        self.subtitulo.y = y_inicio
-        subir()
+        except Exception as e:
+            self._mostrar_directo(texto, e)
 
     def reproducir(self, nombre_animacion, texto_subtitulo):
         if texto_subtitulo != self._texto_subtitulo_actual:
