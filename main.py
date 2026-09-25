@@ -17,7 +17,6 @@ from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
-from kivy.uix.stencilview import StencilView
 from kivy.uix.widget import Widget
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.label import Label
@@ -875,7 +874,7 @@ class HologramaJoi(BoxLayout):
         self.marco.bind(pos=self._redibujar, size=self._redibujar)
         self.add_widget(self.marco)
 
-        self.recorte = StencilView(size_hint=(0.88, 0.85), pos_hint={"center_x": 0.5, "center_y": 0.5})
+        self.recorte = FloatLayout(size_hint=(0.88, 0.85), pos_hint={"center_x": 0.5, "center_y": 0.5})
         self.marco.add_widget(self.recorte)
 
         self.subtitulo = Label(text="", font_name="Orbitron", font_size=dp(12.5), color=(0.78, 0.78, 0.78, 1),
