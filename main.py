@@ -1054,14 +1054,13 @@ class HologramaJoi(BoxLayout):
         self._evento = Clock.schedule_interval(avanzar, 1 / 10)
 
 
-def actualizar_holograma(texto_pantalla, hablar):
+def actualizar_holograma(texto_pantalla, nombre_animacion=None):
+    """El holograma siempre muestra el texto completo de la pantalla actual
+    (preguntas, informes, avisos); 'nombre_animacion' solo elige qué video
+    corto reproducir de fondo, si hay uno cargado para este paso."""
     if PANTALLA is None or not hasattr(PANTALLA, "holograma"):
         return
-    if hablar:
-        nombre_animacion, subtitulo = hablar
-    else:
-        nombre_animacion, subtitulo = None, (texto_pantalla or "").strip()
-    PANTALLA.holograma.reproducir(nombre_animacion, subtitulo)
+    PANTALLA.holograma.reproducir(nombre_animacion, (texto_pantalla or "").strip())
 
 
 COLOR_LIQUIDO_VERDE = (0.62, 0.86, 0.20, 1)
@@ -1206,7 +1205,7 @@ class MainScreen(Screen):
         raiz.add_widget(tarjeta)
 
         self.add_widget(raiz)
-        render(saludo(), hablar=("saludo", "¡Hola Juan! ¿Qué quieres hacer?"))
+        render(saludo(), hablar="saludo")
         pantalla_inicio()
         threading.Thread(target=calibrar_en_segundo_plano, daemon=True).start()
         programar_todas_las_alarmas(mostrar_error_en_pantalla=True)
@@ -1251,6 +1250,20 @@ class BotonRedondeado(Button):
         self._color_instr.rgba = self._color_presionado if self.state == "down" else self._color_fondo
 
 
+def _flash_boton(etiqueta, luego, duracion=0.45):
+    """Muestra el nombre del botón presionado en el holograma un instante
+    antes de ejecutar la acción real (que redibuja la pantalla con el
+    siguiente texto/pregunta)."""
+    if PANTALLA is not None and hasattr(PANTALLA, "holograma"):
+        try:
+            PANTALLA.holograma.reproducir(None, etiqueta)
+        except Exception:
+            pass
+        Clock.schedule_once(lambda dt: luego(), duracion)
+    else:
+        luego()
+
+
 def _boton(texto, on_press, color=COLOR_MORADO_OSCURO):
     b = BotonRedondeado(text=texto, size_hint_y=None, height=dp(48), color_fondo=color)
 
@@ -1259,7 +1272,7 @@ def _boton(texto, on_press, color=COLOR_MORADO_OSCURO):
             sonido("click")
         except Exception:
             pass
-        on_press(inst)
+        _flash_boton(texto, lambda: on_press(inst))
 
     b.bind(on_release=_con_sonido)
     return b
@@ -1285,11 +1298,6 @@ def render(texto, filas_botones=None, pedir_texto=False, teclado_numero=False, h
     filas_botones = _con_cancelar(filas_botones)
     cont = PANTALLA.contenido
     cont.clear_widgets()
-    lbl = Label(text=texto, font_name="Poppins", font_size=dp(15.5), color=COLOR_TEXTO,
-                size_hint_y=None, halign="left", valign="top", line_height=1.3)
-    lbl.bind(width=lambda inst, w: setattr(inst, "text_size", (w, None)))
-    lbl.bind(texture_size=lambda inst, ts: setattr(inst, "height", ts[1] + dp(10)))
-    cont.add_widget(lbl)
 
     if pedir_texto:
         entrada = TextInput(multiline=False, size_hint_y=None, height=dp(48), font_name="Poppins",
@@ -1686,7 +1694,7 @@ def registrar_iniciar():
     iniciar_flujo("registrar", "tipo")
     render("¿Ingreso o gasto?",
            [[("Ingreso", "reg:tipo:ingreso"), ("Gasto", "reg:tipo:gasto")], [("Borrar uno", "reg:borrar")]],
-           hablar=("registrar", "Registrar"))
+           hablar="registrar")
 
 
 def registrar_borrar_menu():
@@ -2677,7 +2685,7 @@ def porcobrar_menu():
     render("¿Qué quieres hacer?",
            [[("Préstamo", "pc:prestamo"), ("Por cobrar", "pc:cobrar")], [("Pagado", "pc:pagado")],
             [("Volver", "menu:main")]],
-           hablar=("porcobrar", "Por cobrar"))
+           hablar="porcobrar")
 
 
 def prestamo_iniciar():
