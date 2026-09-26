@@ -954,7 +954,7 @@ class HologramaJoi(BoxLayout):
             if self._anim_scroll:
                 self._anim_scroll.cancel(self.subtitulo)
                 self._anim_scroll = None
-            Animation.cancel_all(self.subtitulo, "y")
+            Animation.cancel_all(self.subtitulo)
 
             def comenzar(*_):
                 try:
@@ -1253,7 +1253,10 @@ class BotonRedondeado(Button):
 def _flash_boton(etiqueta, luego, duracion=0.45):
     """Muestra el nombre del botón presionado en el holograma un instante
     antes de ejecutar la acción real (que redibuja la pantalla con el
-    siguiente texto/pregunta)."""
+    siguiente texto/pregunta). Deshabilita el panel mientras tanto para
+    que un doble toque no dispare la acción dos veces."""
+    if PANTALLA is not None and hasattr(PANTALLA, "contenido"):
+        PANTALLA.contenido.disabled = True
     if PANTALLA is not None and hasattr(PANTALLA, "holograma"):
         try:
             PANTALLA.holograma.reproducir(None, etiqueta)
@@ -1297,6 +1300,7 @@ def render(texto, filas_botones=None, pedir_texto=False, teclado_numero=False, h
     teclado_numero=True muestra el teclado numérico del teléfono (para montos, días, etc.)."""
     filas_botones = _con_cancelar(filas_botones)
     cont = PANTALLA.contenido
+    cont.disabled = False
     cont.clear_widgets()
 
     if pedir_texto:
